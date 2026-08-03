@@ -105,30 +105,7 @@ Best results:
 - Take the highest-resolution image your phone makes practical.
 - If a spine or cover is hard to read, take a second closer photo of that group.
 
-### 2. Put photos in the intake folder
-
-Put new source images here:
-
-```text
-photos/incoming/
-```
-
-Example:
-
-```text
-photos/incoming/2026-08-03-gamecube-floor.jpg
-photos/incoming/2026-08-03-ps2-floor.jpg
-```
-
-After a photo has been processed and verified, move it to:
-
-```text
-photos/processed/
-```
-
-### 3. Run automated photo ingest
-
-The preferred path is automated ingest. It detects case-like regions, OCRs each crop, matches metadata, and imports only high-confidence results.
+### 2. Open the local web UI
 
 Install optional image/OCR dependencies:
 
@@ -142,59 +119,80 @@ Install the Tesseract OCR binary separately. On macOS with Homebrew:
 brew install tesseract
 ```
 
-Then run:
-
-```bash
-game-collection ingest-photos photos/incoming/ --provider igdb --platform "Nintendo GameCube" --accept-threshold 0.92
-```
-
-What this does:
-
-- scans every image in `photos/incoming/`,
-- crops detected game cases into `review/crops/`,
-- writes OCR candidates to `review/photo-candidates.csv`,
-- writes all match decisions to `review/photo-ingest.audit.csv`,
-- imports rows with confidence at or above the threshold,
-- leaves lower-confidence rows marked `review` in the audit CSV.
-
-The default threshold is intentionally conservative. Lower it only if the audit CSV looks consistently correct for your photos.
-
-### 4. Verify automated results
-
 Start the local interface:
 
 ```bash
 game-collection serve
 ```
 
-Open http://127.0.0.1:8765 and check the newly imported games. The browser is the normal verification surface; CSV review is only for uncertain leftovers.
+Open http://127.0.0.1:8765 and choose `Upload Photos`.
 
-To inspect leftovers:
+### 3. Upload and ingest
 
-```bash
-open review/photo-ingest.audit.csv
-```
+Use the upload form to choose one or more photos directly from your computer or phone sync folder. You do not need to place files in `photos/incoming/` or manage review files yourself.
 
-Rows with `decision=review` were not imported automatically.
+Set:
 
-### 5. Import uncertain leftovers only when needed
+- metadata provider, usually `igdb`,
+- optional platform hint, such as `Nintendo GameCube`,
+- auto-import threshold, default `0.92`,
+- ownership status,
+- initial play status.
 
-If the audit file has missed or uncertain games, edit those rows:
+Then click `Upload And Ingest`.
+
+The web UI handles the choreography:
+
+- stores uploaded photos in an ignored local run folder,
+- crops detected game cases,
+- OCRs each crop,
+- matches candidates against metadata,
+- imports rows with confidence at or above the threshold,
+- shows lower-confidence rows on the results page for correction.
+
+The default threshold is intentionally conservative. Lower it only if the audit CSV looks consistently correct for your photos.
+
+### 4. Verify automated results
+
+After upload, the browser redirects to an ingest results page.
+
+Check:
+
+- imported count,
+- skipped-existing count,
+- rows that need review,
+- detected crop thumbnails,
+- OCR title,
+- matched title,
+- provider ID,
+- confidence.
+
+Rows marked `accept` were imported automatically. Rows marked `review` were not imported yet.
+
+### 5. Fix uncertain leftovers in the browser
+
+For a low-confidence row, edit the fields directly on the results page:
 
 - fix `candidate_title`,
 - confirm `platform`,
-- set the correct provider fields if needed,
+- set or fix `provider`,
+- set or fix `provider_game_id`,
+- fix `matched_title`,
 - change `decision` to `accept`.
 
-Then import accepted rows:
+Click `Save And Import Accepted Rows`.
 
-```bash
-game-collection import-review review/photo-ingest.audit.csv --status owned --played unplayed
-```
+The web UI preserves an internal audit CSV under `review/web-ingests/`, but that folder is ignored and is not part of the normal workflow.
 
 ## Manual Review Fallback
 
-Use this when OCR is unavailable or a photo is too messy.
+Use this when you want a CLI batch workflow, OCR is unavailable, or a photo is too messy.
+
+Put new source images here:
+
+```text
+photos/incoming/
+```
 
 ### 1. Create an intake review file
 
@@ -308,6 +306,7 @@ Available views:
 
 - `Library`: browse, search, and filter the full collection.
 - `Plan Next`: view owned games that are unplayed or currently being played.
+- `Upload Photos`: upload one or more source photos, trigger OCR/matching/import, and review uncertain rows.
 - `Game Detail`: edit metadata, ownership state, location/condition notes, sale notes, and play status.
 
 Useful edits:

@@ -1,18 +1,28 @@
 from __future__ import annotations
 
+import email.policy
+import mimetypes
 import html
 import sqlite3
+import uuid
 import urllib.parse
+from email.parser import BytesParser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 from . import db
+from .automation import import_accepted_rows, match_review_rows
+from .photo_ingest import PhotoIngestError, detect_photo_candidates
+from .providers import ProviderError, get_provider
+from .review import INTAKE_FIELDS, read_review, write_review
 
 
 OWNERSHIP_STATUSES = ["owned", "would_sell", "sold", "loaned", "wishlist"]
 PLAY_STATUSES = ["unplayed", "playing", "completed", "retired"]
+PROVIDER_CHOICES = ["igdb", "thegamesdb", "rawg"]
+WEB_INGEST_ROOT = Path("review/web-ingests")
 
 
 def _h(value: Any) -> str:
@@ -168,6 +178,29 @@ def _layout(title: str, body: str) -> bytes:
     }}
     .actions {{ display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }}
     .muted {{ color: var(--muted); }}
+    .notice {{
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--accent);
+      background: #fff;
+      padding: 12px 14px;
+      border-radius: 6px;
+      margin-bottom: 16px;
+    }}
+    .notice.error {{ border-left-color: #b3261e; }}
+    .upload-panel {{
+      max-width: 760px;
+    }}
+    .review-table input, .review-table select {{
+      min-width: 130px;
+    }}
+    .crop-thumb {{
+      width: 86px;
+      height: 112px;
+      object-fit: cover;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: #e2e6ea;
+    }}
     @media (max-width: 760px) {{
       header, main {{ padding-left: 14px; padding-right: 14px; }}
       form.filters, .detail, .grid {{ grid-template-columns: 1fr; }}
@@ -182,6 +215,7 @@ def _layout(title: str, body: str) -> bytes:
   <header>
     <a href="/">Game Collection</a>
     <a href="/plan">Plan Next</a>
+    <a href="/ingest">Upload Photos</a>
   </header>
   <main>{body}</main>
 </body>
@@ -214,6 +248,36 @@ class CollectionHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.parse_qs(data, keep_blank_values=True)
         return {key: values[-1] for key, values in parsed.items()}
 
+    def _multipart_form(self) -> tuple[dict[str, str], list[dict[str, Any]]]:
+        content_type = self.headers.get("Content-Type", "")
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        message = BytesParser(policy=email.policy.default).parsebytes(
+            f"Content-Type: {content_type}\r\n\r\n".encode("utf-8") + body
+        )
+        fields: dict[str, str] = {}
+        files: list[dict[str, Any]] = []
+        if not message.is_multipart():
+            return fields, files
+        for part in message.iter_parts():
+            name = part.get_param("name", header="content-disposition")
+            filename = part.get_filename()
+            payload = part.get_payload(decode=True) or b""
+            if not name:
+                continue
+            if filename:
+                files.append(
+                    {
+                        "name": name,
+                        "filename": Path(filename).name,
+                        "content_type": part.get_content_type(),
+                        "data": payload,
+                    }
+                )
+            else:
+                fields[name] = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+        return fields, files
+
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
@@ -221,6 +285,16 @@ class CollectionHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/plan":
             self._send_html("Plan Next", self._plan())
+            return
+        if parsed.path == "/ingest":
+            self._send_html("Upload Photos", self._ingest_form())
+            return
+        if parsed.path.startswith("/ingest/"):
+            run_id = parsed.path.removeprefix("/ingest/").strip("/")
+            self._send_html("Ingest Results", self._ingest_results(run_id))
+            return
+        if parsed.path == "/media":
+            self._send_media(parsed.query)
             return
         if parsed.path.startswith("/games/"):
             try:
@@ -234,6 +308,13 @@ class CollectionHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/ingest":
+            self._handle_ingest_upload()
+            return
+        if parsed.path.startswith("/ingest/") and parsed.path.endswith("/review"):
+            run_id = parsed.path.split("/")[2]
+            self._handle_ingest_review(run_id)
+            return
         form = self._form()
         with db.connect(self.db_path) as conn:
             if parsed.path.startswith("/games/") and parsed.path.endswith("/metadata"):
@@ -274,6 +355,27 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 self._redirect(f"/games/{game_id}")
                 return
         self._send_html("Not Found", "<h1>Not found</h1>", HTTPStatus.NOT_FOUND)
+
+    def _send_media(self, query: str) -> None:
+        params = urllib.parse.parse_qs(query)
+        raw_path = (params.get("path") or [""])[0]
+        try:
+            base = WEB_INGEST_ROOT.resolve()
+            media_path = Path(raw_path).resolve()
+            media_path.relative_to(base)
+        except (ValueError, OSError):
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        if not media_path.exists() or not media_path.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        content_type = mimetypes.guess_type(media_path.name)[0] or "application/octet-stream"
+        payload = media_path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
     def _collection(self, query: str) -> str:
         params = urllib.parse.parse_qs(query)
@@ -321,6 +423,201 @@ class CollectionHandler(BaseHTTPRequestHandler):
         with db.connect(self.db_path) as conn:
             rows = list(db.plan_next(conn, limit=100))
         return f"<h1>Plan Next</h1><p class=\"muted\">Owned games that are unplayed or in progress.</p>{self._rows_table(rows)}"
+
+    def _ingest_form(self, message: str | None = None, *, error: bool = False) -> str:
+        notice = f'<div class="notice{" error" if error else ""}">{_h(message)}</div>' if message else ""
+        provider_options = "".join(f'<option value="{provider}">{provider}</option>' for provider in PROVIDER_CHOICES)
+        status_options = "".join(f'<option value="{status}">{status}</option>' for status in OWNERSHIP_STATUSES)
+        played_options = "".join(f'<option value="{status}">{status}</option>' for status in PLAY_STATUSES)
+        return f"""
+<h1>Upload Photos</h1>
+{notice}
+<section class="panel upload-panel">
+  <form method="post" action="/ingest" enctype="multipart/form-data">
+    <label>Game case photos
+      <input type="file" name="photos" accept="image/*" multiple required>
+    </label>
+    <div class="grid">
+      <label>Metadata provider
+        <select name="provider">{provider_options}</select>
+      </label>
+      <label>Platform hint
+        <input name="platform" placeholder="Nintendo GameCube">
+      </label>
+      <label>Auto-import threshold
+        <input name="accept_threshold" type="number" min="0" max="1" step="0.01" value="0.92">
+      </label>
+      <label>Ownership status
+        <select name="status">{status_options}</select>
+      </label>
+      <label>Initial play status
+        <select name="played">{played_options}</select>
+      </label>
+    </div>
+    <div class="actions"><button type="submit">Upload And Ingest</button></div>
+  </form>
+</section>
+"""
+
+    def _run_dir(self, run_id: str) -> Path:
+        return WEB_INGEST_ROOT / run_id
+
+    def _audit_path(self, run_id: str) -> Path:
+        return self._run_dir(run_id) / "audit.csv"
+
+    def _handle_ingest_upload(self) -> None:
+        try:
+            fields, files = self._multipart_form()
+            image_files = [item for item in files if item["name"] == "photos" and item["data"]]
+            if not image_files:
+                self._send_html("Upload Photos", self._ingest_form("Choose at least one photo.", error=True))
+                return
+
+            run_id = uuid.uuid4().hex
+            run_dir = self._run_dir(run_id)
+            uploads_dir = run_dir / "uploads"
+            crops_dir = run_dir / "crops"
+            uploads_dir.mkdir(parents=True, exist_ok=True)
+            crops_dir.mkdir(parents=True, exist_ok=True)
+
+            provider_name = fields.get("provider", "igdb")
+            provider = get_provider(provider_name)
+            platform = fields.get("platform") or None
+            accept_threshold = float(fields.get("accept_threshold") or "0.92")
+            status = fields.get("status") or "owned"
+            played = fields.get("played") or "unplayed"
+
+            rows: list[dict[str, str]] = []
+            for index, file_info in enumerate(image_files, start=1):
+                suffix = Path(file_info["filename"]).suffix.lower() or ".jpg"
+                upload_path = uploads_dir / f"upload-{index:03d}{suffix}"
+                upload_path.write_bytes(file_info["data"])
+                rows.extend(detect_photo_candidates(photo_path=upload_path, crops_dir=crops_dir, platform=platform))
+
+            matched_rows = match_review_rows(provider=provider, rows=rows, accept_threshold=accept_threshold)
+            write_review(self._audit_path(run_id), matched_rows)
+            imported, skipped = import_accepted_rows(
+                db_path=self.db_path,
+                rows=matched_rows,
+                status=status,
+                played=played,
+                skip_existing=True,
+            )
+
+            summary = {
+                "provider": provider_name,
+                "platform": platform or "",
+                "accept_threshold": str(accept_threshold),
+                "status": status,
+                "played": played,
+                "uploaded": str(len(image_files)),
+                "candidates": str(len(rows)),
+                "imported": str(imported),
+                "skipped_existing": str(skipped),
+            }
+            (run_dir / "summary.csv").write_text(
+                "\n".join(f"{key},{value}" for key, value in summary.items()),
+                encoding="utf-8",
+            )
+            self._redirect(f"/ingest/{run_id}")
+        except (PhotoIngestError, ProviderError, ValueError) as exc:
+            self._send_html("Upload Photos", self._ingest_form(str(exc), error=True), HTTPStatus.BAD_REQUEST)
+
+    def _summary(self, run_id: str) -> dict[str, str]:
+        path = self._run_dir(run_id) / "summary.csv"
+        if not path.exists():
+            return {}
+        summary: dict[str, str] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition(",")
+            summary[key] = value
+        return summary
+
+    def _ingest_results(self, run_id: str, message: str | None = None) -> str:
+        audit_path = self._audit_path(run_id)
+        if not audit_path.exists():
+            return "<h1>Ingest run not found</h1>"
+        rows = read_review(audit_path)
+        summary = self._summary(run_id)
+        accepted = sum(1 for row in rows if row.get("decision") == "accept")
+        needs_review = len(rows) - accepted
+        notice = f'<div class="notice">{_h(message)}</div>' if message else ""
+        return f"""
+<h1>Ingest Results</h1>
+{notice}
+<section class="panel">
+  <p><strong>{_h(summary.get('imported', accepted))}</strong> imported, <strong>{_h(summary.get('skipped_existing', '0'))}</strong> skipped as existing, <strong>{needs_review}</strong> needs review.</p>
+  <p class="muted">Provider: {_h(summary.get('provider'))} | Platform hint: {_h(summary.get('platform')) or 'none'} | Threshold: {_h(summary.get('accept_threshold'))}</p>
+</section>
+<form method="post" action="/ingest/{_h(run_id)}/review">
+  {self._review_rows_table(rows)}
+  <div class="actions"><button type="submit">Save And Import Accepted Rows</button><a class="button secondary" href="/ingest">Upload More Photos</a><a class="button secondary" href="/">Back To Library</a></div>
+</form>
+"""
+
+    def _review_rows_table(self, rows: list[dict[str, str]]) -> str:
+        if not rows:
+            return '<div class="panel muted">No case candidates were detected.</div>'
+        table_rows = []
+        decision_options = ["review", "accept", "ignore"]
+        for index, row in enumerate(rows):
+            crop = row.get("crop_path")
+            crop_html = (
+                f'<img class="crop-thumb" src="/media?path={urllib.parse.quote(crop)}" alt="Detected crop">'
+                if crop
+                else ""
+            )
+            options = "".join(
+                f'<option value="{decision}"{_selected(row.get("decision"), decision)}>{decision}</option>'
+                for decision in decision_options
+            )
+            hidden_metadata = "".join(
+                f'<input type="hidden" name="row_{index}_{field}" value="{_h(row.get(field))}">'
+                for field in ("release_date", "developer", "publisher", "description", "cover_url")
+            )
+            table_rows.append(
+                f"""
+<tr>
+  <td>{crop_html}<input type="hidden" name="row_{index}_photo_path" value="{_h(row.get('photo_path'))}"><input type="hidden" name="row_{index}_crop_path" value="{_h(crop)}"></td>
+  <td><input name="row_{index}_candidate_title" value="{_h(row.get('candidate_title'))}"></td>
+  <td><input name="row_{index}_platform" value="{_h(row.get('platform'))}"></td>
+  <td><input name="row_{index}_provider" value="{_h(row.get('provider'))}"></td>
+  <td><input name="row_{index}_provider_game_id" value="{_h(row.get('provider_game_id'))}"></td>
+  <td><input name="row_{index}_matched_title" value="{_h(row.get('matched_title'))}"></td>
+  <td><input name="row_{index}_confidence" value="{_h(row.get('confidence'))}"></td>
+  <td><select name="row_{index}_decision">{options}</select></td>
+  <td><input name="row_{index}_notes" value="{_h(row.get('notes'))}">{hidden_metadata}</td>
+</tr>"""
+            )
+        return f"""
+<input type="hidden" name="row_count" value="{len(rows)}">
+<table class="review-table">
+  <thead><tr><th>Crop</th><th>OCR Title</th><th>Platform</th><th>Provider</th><th>Provider ID</th><th>Matched Title</th><th>Confidence</th><th>Decision</th><th>Notes</th></tr></thead>
+  <tbody>{''.join(table_rows)}</tbody>
+</table>"""
+
+    def _handle_ingest_review(self, run_id: str) -> None:
+        form = self._form()
+        row_count = int(form.get("row_count") or "0")
+        rows: list[dict[str, str]] = []
+        for index in range(row_count):
+            row = {}
+            for field in INTAKE_FIELDS:
+                row[field] = form.get(f"row_{index}_{field}", "")
+            rows.append(row)
+        write_review(self._audit_path(run_id), rows)
+        summary = self._summary(run_id)
+        imported, skipped = import_accepted_rows(
+            db_path=self.db_path,
+            rows=rows,
+            status=summary.get("status") or "owned",
+            played=summary.get("played") or "unplayed",
+            skip_existing=True,
+        )
+        self._send_html(
+            "Ingest Results",
+            self._ingest_results(run_id, f"Imported {imported} newly accepted row(s); skipped {skipped} existing row(s)."),
+        )
 
     def _rows_table(self, rows: list[sqlite3.Row]) -> str:
         if not rows:
@@ -423,4 +720,3 @@ def serve(db_path: Path, host: str = "127.0.0.1", port: int = 8765) -> None:
     server = ThreadingHTTPServer((host, port), handler)
     print(f"Serving game collection at http://{host}:{port}")
     server.serve_forever()
-
