@@ -129,7 +129,7 @@ Open http://127.0.0.1:8765 and choose `Upload Photos`.
 
 ### 3. Upload and ingest
 
-Use the upload form to choose one or more photos directly from your computer or phone sync folder. You do not need to place files in `photos/incoming/` or manage review files yourself.
+Use the upload form to choose one or more photos directly from your computer or phone sync folder. The file picker supports selecting multiple images at once, and the importer processes every uploaded image in the request. You do not need to place files in `photos/incoming/` or manage review files yourself.
 
 Set:
 

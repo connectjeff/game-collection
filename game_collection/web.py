@@ -382,8 +382,11 @@ class CollectionHandler(BaseHTTPRequestHandler):
         q = (params.get("q") or [""])[0].strip().casefold()
         owning = (params.get("owning") or [""])[0]
         played = (params.get("played") or [""])[0]
-        with db.connect(self.db_path) as conn:
+        conn = db.connect(self.db_path)
+        try:
             rows = list(db.list_collection(conn))
+        finally:
+            conn.close()
         filtered = []
         for row in rows:
             text = f"{row['title']} {row['platform'] or ''}".casefold()
@@ -420,8 +423,11 @@ class CollectionHandler(BaseHTTPRequestHandler):
         return body
 
     def _plan(self) -> str:
-        with db.connect(self.db_path) as conn:
+        conn = db.connect(self.db_path)
+        try:
             rows = list(db.plan_next(conn, limit=100))
+        finally:
+            conn.close()
         return f"<h1>Plan Next</h1><p class=\"muted\">Owned games that are unplayed or in progress.</p>{self._rows_table(rows)}"
 
     def _ingest_form(self, message: str | None = None, *, error: bool = False) -> str:
@@ -643,8 +649,11 @@ class CollectionHandler(BaseHTTPRequestHandler):
 </table>"""
 
     def _game_detail(self, game_id: int) -> str:
-        with db.connect(self.db_path) as conn:
+        conn = db.connect(self.db_path)
+        try:
             row = db.get_game_detail(conn, game_id=game_id)
+        finally:
+            conn.close()
         if row is None:
             return "<h1>Game not found</h1>"
         cover = (
