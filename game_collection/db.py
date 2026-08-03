@@ -177,6 +177,14 @@ def add_collection_item(
     return int(cursor.lastrowid)
 
 
+def has_collection_item(conn: sqlite3.Connection, *, game_id: int) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM collection_items WHERE game_id = ? LIMIT 1",
+        (game_id,),
+    ).fetchone()
+    return row is not None
+
+
 def add_playthrough(
     conn: sqlite3.Connection,
     *,

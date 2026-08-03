@@ -15,6 +15,11 @@ INTAKE_FIELDS = [
     "provider",
     "provider_game_id",
     "matched_title",
+    "release_date",
+    "developer",
+    "publisher",
+    "description",
+    "cover_url",
     "confidence",
     "decision",
     "notes",
@@ -35,6 +40,11 @@ def write_intake_template(photo_path: Path, out_path: Path) -> None:
                 "provider": "",
                 "provider_game_id": "",
                 "matched_title": "",
+                "release_date": "",
+                "developer": "",
+                "publisher": "",
+                "description": "",
+                "cover_url": "",
                 "confidence": "",
                 "decision": "review",
                 "notes": "Fill candidate_title/platform, then run match-review.",
@@ -56,7 +66,7 @@ def write_review(path: Path, rows: list[dict[str, str]]) -> None:
             writer.writerow({field: row.get(field, "") for field in INTAKE_FIELDS})
 
 
-def match_to_row(row: dict[str, str], match: GameMatch | None) -> dict[str, str]:
+def match_to_row(row: dict[str, str], match: GameMatch | None, *, accept_threshold: float = 0.85) -> dict[str, str]:
     updated = dict(row)
     if match is None:
         updated["decision"] = "review"
@@ -66,12 +76,16 @@ def match_to_row(row: dict[str, str], match: GameMatch | None) -> dict[str, str]
             "provider": match.provider,
             "provider_game_id": match.provider_game_id,
             "matched_title": match.title,
+            "release_date": match.release_date or "",
+            "developer": match.developer or "",
+            "publisher": match.publisher or "",
+            "description": match.description or "",
+            "cover_url": match.cover_url or "",
             "confidence": f"{match.confidence:.2f}",
-            "decision": "accept" if match.confidence >= 0.85 else "review",
+            "decision": "accept" if match.confidence >= accept_threshold else "review",
             "notes": json.dumps(match.raw or {}, ensure_ascii=True)[:1000],
         }
     )
     if not updated.get("platform") and match.platform:
         updated["platform"] = match.platform
     return updated
-

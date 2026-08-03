@@ -126,7 +126,77 @@ After a photo has been processed and verified, move it to:
 photos/processed/
 ```
 
-### 3. Create an intake review file
+### 3. Run automated photo ingest
+
+The preferred path is automated ingest. It detects case-like regions, OCRs each crop, matches metadata, and imports only high-confidence results.
+
+Install optional image/OCR dependencies:
+
+```bash
+python -m pip install -e '.[image]'
+```
+
+Install the Tesseract OCR binary separately. On macOS with Homebrew:
+
+```bash
+brew install tesseract
+```
+
+Then run:
+
+```bash
+game-collection ingest-photos photos/incoming/ --provider igdb --platform "Nintendo GameCube" --accept-threshold 0.92
+```
+
+What this does:
+
+- scans every image in `photos/incoming/`,
+- crops detected game cases into `review/crops/`,
+- writes OCR candidates to `review/photo-candidates.csv`,
+- writes all match decisions to `review/photo-ingest.audit.csv`,
+- imports rows with confidence at or above the threshold,
+- leaves lower-confidence rows marked `review` in the audit CSV.
+
+The default threshold is intentionally conservative. Lower it only if the audit CSV looks consistently correct for your photos.
+
+### 4. Verify automated results
+
+Start the local interface:
+
+```bash
+game-collection serve
+```
+
+Open http://127.0.0.1:8765 and check the newly imported games. The browser is the normal verification surface; CSV review is only for uncertain leftovers.
+
+To inspect leftovers:
+
+```bash
+open review/photo-ingest.audit.csv
+```
+
+Rows with `decision=review` were not imported automatically.
+
+### 5. Import uncertain leftovers only when needed
+
+If the audit file has missed or uncertain games, edit those rows:
+
+- fix `candidate_title`,
+- confirm `platform`,
+- set the correct provider fields if needed,
+- change `decision` to `accept`.
+
+Then import accepted rows:
+
+```bash
+game-collection import-review review/photo-ingest.audit.csv --status owned --played unplayed
+```
+
+## Manual Review Fallback
+
+Use this when OCR is unavailable or a photo is too messy.
+
+### 1. Create an intake review file
 
 For each source photo, create a review CSV:
 
@@ -134,14 +204,14 @@ For each source photo, create a review CSV:
 game-collection new-intake photos/incoming/2026-08-03-gamecube-floor.jpg --out review/2026-08-03-gamecube-floor.csv
 ```
 
-The current implementation creates the same review file that the future OCR detector will fill automatically. For now, open the CSV and add one row per visible game with:
+Open the CSV and add one row per visible game with:
 
 - `candidate_title`
 - `platform`
 
 Leave the provider/match columns blank before matching.
 
-### 4. Match candidate titles against metadata
+### 2. Match candidate titles against metadata
 
 Use IGDB:
 
@@ -157,7 +227,7 @@ game-collection match-review review/2026-08-03-gamecube-floor.csv --provider the
 
 The matcher writes `decision=accept` for high-confidence matches and `decision=review` for uncertain ones.
 
-### 5. Verify the matched CSV
+### 3. Verify the matched CSV
 
 Open the `.matched.csv` before importing.
 
@@ -171,7 +241,7 @@ For each row:
 
 This review step is deliberate: it prevents a blurry cover or ambiguous title from polluting the library.
 
-### 6. Import accepted rows
+### 4. Import accepted rows
 
 Import only accepted rows:
 
@@ -185,7 +255,7 @@ If the whole batch is already completed:
 game-collection import-review review/2026-08-03-gamecube-floor.matched.csv --status owned --played completed
 ```
 
-### 7. Verify in the browser
+### 5. Verify in the browser
 
 Start the local interface:
 
@@ -204,7 +274,7 @@ Open http://127.0.0.1:8765 and check:
 
 Click a game title to edit its metadata, update ownership, mark it as a sell candidate, mark it sold, or record play status.
 
-### 8. Plan what to play next
+### 6. Plan what to play next
 
 In the browser, open the `Plan Next` view.
 
@@ -272,10 +342,11 @@ The default `.gitignore` excludes those local files and keeps only placeholders 
 
 ## Current Photo Recognition Status
 
-The first version creates the intake/review pipeline and data model. The `new-intake` command produces a CSV for candidates from a photo, leaving room for an OCR/detection backend. The intended next step is to add an OpenCV + OCR extractor that:
+The current OCR implementation is intentionally conservative:
 
-- detects rectangular case regions,
+- it detects rectangular case regions,
 - crops each case,
-- runs OCR on title/spine areas,
+- runs OCR on each crop in multiple orientations,
 - ranks metadata matches using title/platform/provider results,
+- imports only high-confidence matches,
 - asks for review only when confidence is low.

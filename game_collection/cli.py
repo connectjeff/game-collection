@@ -5,7 +5,9 @@ import json
 from pathlib import Path
 
 from . import db
+from .automation import auto_import_review
 from .config import load_dotenv
+from .photo_ingest import PhotoIngestError, image_paths, write_photo_candidates
 from .providers import GameMatch, ProviderError, get_provider
 from .review import match_to_row, read_review, write_intake_template, write_review
 from .web import serve
@@ -100,6 +102,11 @@ def _row_to_match(row: dict[str, str]) -> GameMatch:
         provider_game_id=row["provider_game_id"],
         title=row.get("matched_title") or row["candidate_title"],
         platform=row.get("platform") or None,
+        release_date=row.get("release_date") or None,
+        developer=row.get("developer") or None,
+        publisher=row.get("publisher") or None,
+        description=row.get("description") or None,
+        cover_url=row.get("cover_url") or None,
         confidence=float(row.get("confidence") or 0.0),
         raw={"review_notes": row.get("notes")},
     )
@@ -122,6 +129,10 @@ def cmd_import_review(args: argparse.Namespace) -> int:
                 provider_game_id=match.provider_game_id,
                 title=match.title,
                 platform=match.platform,
+                release_date=match.release_date,
+                developer=match.developer,
+                publisher=match.publisher,
+                description=match.description,
                 cover_url=match.cover_url,
                 metadata_json=json.dumps(match.raw or {}, ensure_ascii=True),
             )
@@ -129,6 +140,55 @@ def cmd_import_review(args: argparse.Namespace) -> int:
             db.add_playthrough(conn, game_id=game_id, play_status=args.played)
             imported += 1
     print(f"Imported {imported} accepted rows.")
+    return 0
+
+
+def cmd_auto_import_review(args: argparse.Namespace) -> int:
+    provider = get_provider(args.provider)
+    result = auto_import_review(
+        db_path=args.db,
+        review_csv=args.review_csv,
+        provider=provider,
+        audit_path=args.audit_out,
+        accept_threshold=args.accept_threshold,
+        status=args.status,
+        played=args.played,
+        skip_existing=not args.allow_duplicates,
+    )
+    print(
+        f"Imported {result.imported}; skipped_existing={result.skipped_existing}; "
+        f"needs_review={result.needs_review}; audit={result.audit_path}"
+    )
+    return 0
+
+
+def cmd_ingest_photos(args: argparse.Namespace) -> int:
+    photos = image_paths(args.path)
+    if not photos:
+        print(f"No image files found in {args.path}")
+        return 0
+    candidate_count = write_photo_candidates(
+        photo_paths=photos,
+        out_path=args.candidates_out,
+        crops_dir=args.crops_dir,
+        platform=args.platform,
+    )
+    provider = get_provider(args.provider)
+    result = auto_import_review(
+        db_path=args.db,
+        review_csv=args.candidates_out,
+        provider=provider,
+        audit_path=args.audit_out,
+        accept_threshold=args.accept_threshold,
+        status=args.status,
+        played=args.played,
+        skip_existing=not args.allow_duplicates,
+    )
+    print(
+        f"Detected {candidate_count} candidates from {len(photos)} photo(s). "
+        f"Imported {result.imported}; skipped_existing={result.skipped_existing}; "
+        f"needs_review={result.needs_review}; candidates={args.candidates_out}; audit={result.audit_path}"
+    )
     return 0
 
 
@@ -228,6 +288,31 @@ def build_parser() -> argparse.ArgumentParser:
     import_review.add_argument("--played", default="unplayed", choices=["unplayed", "playing", "completed", "retired"])
     import_review.set_defaults(func=cmd_import_review)
 
+    auto_import = subparsers.add_parser("auto-import-review", help="Match and import high-confidence rows from a review CSV")
+    _add_db_arg(auto_import)
+    auto_import.add_argument("review_csv", type=Path)
+    auto_import.add_argument("--provider", default="igdb", choices=PROVIDER_CHOICES)
+    auto_import.add_argument("--audit-out", type=Path, default=Path("review/auto-ingest.audit.csv"))
+    auto_import.add_argument("--accept-threshold", type=float, default=0.92)
+    auto_import.add_argument("--status", default="owned", choices=["owned", "would_sell", "sold", "loaned", "wishlist"])
+    auto_import.add_argument("--played", default="unplayed", choices=["unplayed", "playing", "completed", "retired"])
+    auto_import.add_argument("--allow-duplicates", action="store_true")
+    auto_import.set_defaults(func=cmd_auto_import_review)
+
+    ingest_photos = subparsers.add_parser("ingest-photos", help="OCR photos, match metadata, and import high-confidence games")
+    _add_db_arg(ingest_photos)
+    ingest_photos.add_argument("path", type=Path, help="Image file or folder of image files")
+    ingest_photos.add_argument("--provider", default="igdb", choices=PROVIDER_CHOICES)
+    ingest_photos.add_argument("--platform")
+    ingest_photos.add_argument("--candidates-out", type=Path, default=Path("review/photo-candidates.csv"))
+    ingest_photos.add_argument("--audit-out", type=Path, default=Path("review/photo-ingest.audit.csv"))
+    ingest_photos.add_argument("--crops-dir", type=Path, default=Path("review/crops"))
+    ingest_photos.add_argument("--accept-threshold", type=float, default=0.92)
+    ingest_photos.add_argument("--status", default="owned", choices=["owned", "would_sell", "sold", "loaned", "wishlist"])
+    ingest_photos.add_argument("--played", default="unplayed", choices=["unplayed", "playing", "completed", "retired"])
+    ingest_photos.add_argument("--allow-duplicates", action="store_true")
+    ingest_photos.set_defaults(func=cmd_ingest_photos)
+
     mark = subparsers.add_parser("mark", help="Mark a collection item as owned/would_sell/sold/etc.")
     _add_db_arg(mark)
     mark.add_argument("collection_item_id", type=int)
@@ -269,7 +354,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         return args.func(args)
-    except ProviderError as exc:
+    except (ProviderError, PhotoIngestError) as exc:
         parser.exit(2, f"error: {exc}\n")
 
 

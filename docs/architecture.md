@@ -22,9 +22,10 @@ flowchart LR
     C --> D["OCR title/spine text"]
     D --> E["Metadata search"]
     E --> F["Match ranking"]
-    F --> G["Human review CSV"]
-    G --> H["SQLite import"]
-    H --> I["Planning and collection views"]
+    F --> G{"Confidence >= threshold?"}
+    G -->|yes| H["SQLite import"]
+    G -->|no| I["Audit CSV review queue"]
+    H --> J["Planning and collection views"]
 ```
 
 ## Data Model
@@ -74,19 +75,25 @@ The photo recognizer should be optimized for accuracy over magic:
 6. Auto-accept only high-confidence matches.
 7. Send ambiguous results to CSV review.
 
-## Recommended Next Implementation Step
+## Automated Ingest
 
-Add optional dependencies behind an `image` extra:
+Photo ingest lives behind optional dependencies:
 
 ```toml
 [project.optional-dependencies]
 image = ["opencv-python", "pillow", "pytesseract"]
 ```
 
-Then implement:
+The primary command is:
 
 ```bash
-game-collection detect-cases photos/floor-layout.jpg --out review/floor-layout.csv --crops review/crops
+game-collection ingest-photos photos/incoming/ --provider igdb --platform "Nintendo GameCube"
 ```
 
-The current `new-intake` command provides the same downstream review/import shape so the database and matching workflow can be used immediately.
+It writes:
+
+- `review/photo-candidates.csv` for OCR output,
+- `review/photo-ingest.audit.csv` for match/import decisions,
+- `review/crops/` for detected case crops.
+
+High-confidence rows are imported automatically. Low-confidence rows stay in the audit CSV for later cleanup.

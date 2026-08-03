@@ -1,0 +1,99 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+from game_collection import db
+from game_collection.automation import auto_import_review
+from game_collection.providers import GameMatch
+
+
+class FakeProvider:
+    name = "fake"
+
+    def search(self, title: str, platform: str | None = None, limit: int = 5) -> list[GameMatch]:
+        confidence = 0.97 if title == "Metroid Prime" else 0.71
+        return [
+            GameMatch(
+                provider="fake",
+                provider_game_id=title.casefold().replace(" ", "-"),
+                title=title,
+                platform=platform,
+                confidence=confidence,
+                raw={"source": "fake"},
+            )
+        ]
+
+
+class AutoIngestTests(unittest.TestCase):
+    def test_auto_import_only_accepts_high_confidence_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            review = root / "review.csv"
+            audit = root / "audit.csv"
+            db_path = root / "collection.sqlite3"
+            review.write_text(
+                "\n".join(
+                    [
+                        "photo_path,crop_path,candidate_title,platform,provider,provider_game_id,matched_title,confidence,decision,notes",
+                        "photo.jpg,,Metroid Prime,Nintendo GameCube,,,,,,",
+                        "photo.jpg,,Prime,Nintendo GameCube,,,,,,",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = auto_import_review(
+                db_path=db_path,
+                review_csv=review,
+                provider=FakeProvider(),
+                audit_path=audit,
+                accept_threshold=0.92,
+                status="owned",
+                played="unplayed",
+            )
+
+            self.assertEqual(result.imported, 1)
+            self.assertEqual(result.needs_review, 1)
+            self.assertTrue(audit.exists())
+            with db.connect(db_path) as conn:
+                rows = list(db.list_collection(conn))
+            self.assertEqual([row["title"] for row in rows], ["Metroid Prime"])
+
+    def test_auto_import_skips_existing_games_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            review = root / "review.csv"
+            audit = root / "audit.csv"
+            db_path = root / "collection.sqlite3"
+            review.write_text(
+                "\n".join(
+                    [
+                        "photo_path,crop_path,candidate_title,platform,provider,provider_game_id,matched_title,confidence,decision,notes",
+                        "photo.jpg,,Metroid Prime,Nintendo GameCube,,,,,,",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            kwargs = {
+                "db_path": db_path,
+                "review_csv": review,
+                "provider": FakeProvider(),
+                "audit_path": audit,
+                "accept_threshold": 0.92,
+                "status": "owned",
+                "played": "unplayed",
+            }
+            first = auto_import_review(**kwargs)
+            second = auto_import_review(**kwargs)
+
+            self.assertEqual(first.imported, 1)
+            self.assertEqual(second.imported, 0)
+            self.assertEqual(second.skipped_existing, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
