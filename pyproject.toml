@@ -12,6 +12,9 @@ image = ["opencv-python>=4.8", "pillow>=10", "pytesseract>=0.3"]
 [project.scripts]
 game-collection = "game_collection.cli:main"
 
+[tool.setuptools.packages.find]
+include = ["game_collection*"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
