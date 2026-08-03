@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+collection.sqlite3
+.DS_Store
+
+# Local source photos and generated review files can contain personal library data.
+photos/incoming/*
+photos/processed/*
+review/*
+!photos/incoming/.gitkeep
+!photos/processed/.gitkeep
+!review/.gitkeep
+!examples/
+!examples/**

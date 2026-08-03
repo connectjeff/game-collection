@@ -1,0 +1,4 @@
+photo_path,crop_path,candidate_title,platform,provider,provider_game_id,matched_title,confidence,decision,notes
+photos/incoming/example-floor-photo.jpg,,Metroid Prime,Nintendo GameCube,igdb,134257,Metroid Prime,1.00,accept,Example row only. Replace with your own review CSV.
+photos/incoming/example-floor-photo.jpg,,Paper Mario: The Thousand-Year Door,Nintendo GameCube,,,,,review,Example uncertain row only. Run match-review before import.
+
