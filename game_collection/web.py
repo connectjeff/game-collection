@@ -28,7 +28,7 @@ from .cover_match import (
     prebuild_prioritized_cover_indexes,
     read_cover_index,
 )
-from .photo_ingest import PhotoIngestError, detect_photo_candidates
+from .photo_ingest import IMAGE_SUFFIXES, PhotoIngestError, detect_photo_candidates
 from .providers import ProviderError, get_provider
 from .review import INTAKE_FIELDS, read_review, write_review
 
@@ -343,6 +343,41 @@ def _layout(title: str, body: str) -> bytes:
     .upload-panel {{
       max-width: 760px;
     }}
+    .ingest-summary-grid {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
+      gap: 16px;
+      align-items: start;
+    }}
+    .uploaded-photos {{
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+      gap: 8px;
+    }}
+    .uploaded-photo-thumb {{
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      object-fit: cover;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #e2e6ea;
+    }}
+    .manual-review {{
+      margin-top: 18px;
+    }}
+    .manual-review-form {{
+      display: grid;
+      grid-template-columns: minmax(180px, 1fr) 150px minmax(260px, 2fr) auto;
+      gap: 12px;
+      align-items: end;
+    }}
+    .manual-preview {{
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin-top: 12px;
+      color: var(--muted);
+    }}
     .review-table input, .review-table select {{
       min-width: 0;
     }}
@@ -495,7 +530,7 @@ def _layout(title: str, body: str) -> bytes:
     }}
     @media (max-width: 760px) {{
       header, main {{ padding-left: 14px; padding-right: 14px; }}
-      form.filters, .detail, .grid {{ grid-template-columns: 1fr; }}
+      form.filters, .detail, .grid, .ingest-summary-grid, .manual-review-form {{ grid-template-columns: 1fr; }}
       table, thead, tbody, tr, th, td {{ display: block; }}
       thead {{ display: none; }}
       tr {{ border-bottom: 1px solid var(--line); padding: 8px 0; }}
@@ -514,6 +549,18 @@ def _layout(title: str, body: str) -> bytes:
   </style>
   <script>
     const matchSuggestionState = new Map();
+    let manualMatchSuggestions = [];
+    let selectedManualMatch = null;
+
+    function escapeHtml(value) {{
+      return String(value || "").replace(/[&<>"']/g, (char) => ({{
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      }}[char]));
+    }}
 
     function setField(row, field, value) {{
       const element = document.querySelector(`[name="row_${{row}}_${{field}}"]`);
@@ -548,6 +595,57 @@ def _layout(title: str, body: str) -> bytes:
       setField(row, "confidence", match.confidence);
       setField(row, "notes", match.notes);
       setMatchedCover(row, match.cover_path);
+    }}
+
+    function playStatusOptions(selected) {{
+      return {json.dumps(PLAY_STATUSES)}.map((status) =>
+        `<option value="${{escapeHtml(status)}}"${{status === selected ? " selected" : ""}}>${{escapeHtml(status)}}</option>`
+      ).join("");
+    }}
+
+    function platformOptions(selected) {{
+      const options = Array.from(document.querySelector("[data-role='manual-platform']")?.options || []).map((option) => option.value);
+      if (selected && !options.includes(selected)) options.unshift(selected);
+      return options.map((platform) =>
+        `<option value="${{escapeHtml(platform)}}"${{platform === selected ? " selected" : ""}}>${{escapeHtml(platform)}}</option>`
+      ).join("");
+    }}
+
+    function hiddenReviewMetadata(row, data) {{
+      const fields = ["provider", "provider_game_id", "candidate_title", "release_date", "developer", "publisher", "description", "cover_url", "confidence", "notes"];
+      return fields.map((field) =>
+        `<input type="hidden" name="row_${{row}}_${{field}}" value="${{escapeHtml(data[field] || "")}}">`
+      ).join("");
+    }}
+
+    function reviewRowHtml(row, data) {{
+      const coverPath = data.cover_path || "";
+      const matchedHidden = coverPath ? "" : " hidden";
+      const matchedSrc = coverPath ? ` src="/media?path=${{encodeURIComponent(coverPath)}}"` : "";
+      return `
+<tr data-row="${{row}}" data-decision="review">
+  <td>
+    <div class="cover-pair">
+      <div class="cover-sample"><div class="cover placeholder crop-thumb">Manual</div><span class="cover-label">Uploaded</span></div>
+      <div class="cover-sample" data-row="${{row}}" data-role="matched-cover-sample"${{matchedHidden}}>
+        <img class="crop-thumb" data-row="${{row}}" data-role="matched-cover" alt="Matched cached cover art"${{matchedSrc}}${{matchedHidden}}>
+        <span class="cover-label">Matched</span>
+      </div>
+    </div>
+    <input type="hidden" name="row_${{row}}_photo_path" value="">
+    <input type="hidden" name="row_${{row}}_crop_path" value="">
+  </td>
+  <td><select name="row_${{row}}_platform" data-row="${{row}}" data-role="row-platform-select">${{platformOptions(data.platform || "")}}</select></td>
+  <td><select name="row_${{row}}_play_status">${{playStatusOptions(data.play_status || "unplayed")}}</select></td>
+  <td>
+    <div class="match-control">
+      <textarea class="title-field" name="row_${{row}}_matched_title" rows="2" data-row="${{row}}" data-role="match-title-input" autocomplete="off">${{escapeHtml(data.matched_title || "")}}</textarea>
+      <div class="match-suggestions" data-row="${{row}}" data-role="match-suggestions" hidden></div>
+    </div>
+  </td>
+  <td><div class="decision-actions" data-row="${{row}}" data-role="decision-actions">${{actionButtonsFor("review", row)}}</div><input type="hidden" name="row_${{row}}_decision" value="review"></td>
+  <td>${{hiddenReviewMetadata(row, data)}}</td>
+</tr>`;
     }}
 
     function updateOutcomeCounts() {{
@@ -631,44 +729,194 @@ def _layout(title: str, body: str) -> bytes:
       return matches;
     }}
 
+    function installMatchInput(input) {{
+      if (input.dataset.listenerInstalled === "true") return;
+      input.dataset.listenerInstalled = "true";
+      let timer;
+      input.addEventListener("input", () => {{
+        clearTimeout(timer);
+        timer = setTimeout(() => loadMatches(input), 180);
+      }});
+      input.addEventListener("focus", () => loadMatches(input));
+      input.addEventListener("blur", () => {{
+        const row = input.dataset.row;
+        const matches = matchSuggestionState.get(row) || [];
+        const exact = matches.find((match) => match.title.toLowerCase() === input.value.trim().toLowerCase());
+        if (exact) applyMatch(row, exact);
+        setTimeout(() => {{
+          const panel = document.querySelector(`[data-row="${{row}}"][data-role="match-suggestions"]`);
+          if (panel) panel.hidden = true;
+        }}, 120);
+      }});
+    }}
+
     function installMatchInputs() {{
       document.querySelectorAll("[data-role='match-title-input']").forEach((input) => {{
-        let timer;
-        input.addEventListener("input", () => {{
-          clearTimeout(timer);
-          timer = setTimeout(() => loadMatches(input), 180);
-        }});
-        input.addEventListener("focus", () => loadMatches(input));
-        input.addEventListener("blur", () => {{
-          const row = input.dataset.row;
-          const matches = matchSuggestionState.get(row) || [];
-          const exact = matches.find((match) => match.title.toLowerCase() === input.value.trim().toLowerCase());
-          if (exact) applyMatch(row, exact);
-          setTimeout(() => {{
-            const panel = document.querySelector(`[data-row="${{row}}"][data-role="match-suggestions"]`);
-            if (panel) panel.hidden = true;
-          }}, 120);
-        }});
+        installMatchInput(input);
+      }});
+    }}
+
+    function installPlatformSelector(select) {{
+      if (select.dataset.listenerInstalled === "true") return;
+      select.dataset.listenerInstalled = "true";
+      select.addEventListener("change", () => {{
+        const row = select.dataset.row;
+        setField(row, "provider_game_id", "");
+        setField(row, "release_date", "");
+        setField(row, "developer", "");
+        setField(row, "publisher", "");
+        setField(row, "description", "");
+        setField(row, "cover_url", "");
+        setField(row, "confidence", "");
+        setField(row, "notes", "");
+        setMatchedCover(row, "");
+        const input = document.querySelector(`[data-row="${{row}}"][data-role="match-title-input"]`);
+        if (input) loadMatches(input);
       }});
     }}
 
     function installPlatformSelectors() {{
-      document.querySelectorAll("[data-role='row-platform-select']").forEach((select) => {{
-        select.addEventListener("change", () => {{
-          const row = select.dataset.row;
-          setField(row, "provider_game_id", "");
-          setField(row, "release_date", "");
-          setField(row, "developer", "");
-          setField(row, "publisher", "");
-          setField(row, "description", "");
-          setField(row, "cover_url", "");
-          setField(row, "confidence", "");
-          setField(row, "notes", "");
-          setMatchedCover(row, "");
-          const input = document.querySelector(`[data-row="${{row}}"][data-role="match-title-input"]`);
-          if (input) loadMatches(input);
+      document.querySelectorAll("[data-role='row-platform-select']").forEach((select) => installPlatformSelector(select));
+    }}
+
+    function updateManualPreview(match) {{
+      const preview = document.querySelector("[data-role='manual-preview']");
+      const image = document.querySelector("[data-role='manual-cover']");
+      const title = document.querySelector("[data-role='manual-selected-title']");
+      if (!preview || !image || !title) return;
+      if (match && match.cover_path) {{
+        image.src = `/media?path=${{encodeURIComponent(match.cover_path)}}`;
+        image.hidden = false;
+        title.textContent = match.title;
+        preview.hidden = false;
+      }} else {{
+        image.removeAttribute("src");
+        image.hidden = true;
+        title.textContent = "";
+        preview.hidden = true;
+      }}
+    }}
+
+    function applyManualMatch(match) {{
+      selectedManualMatch = match;
+      const input = document.querySelector("[data-role='manual-title']");
+      if (input) input.value = match.title || "";
+      updateManualPreview(match);
+    }}
+
+    async function loadManualMatches() {{
+      const platform = document.querySelector("[data-role='manual-platform']")?.value || "";
+      const input = document.querySelector("[data-role='manual-title']");
+      const panel = document.querySelector("[data-role='manual-suggestions']");
+      const q = input?.value.trim() || "";
+      selectedManualMatch = selectedManualMatch && selectedManualMatch.title === q && selectedManualMatch.platform === platform
+        ? selectedManualMatch
+        : null;
+      updateManualPreview(selectedManualMatch);
+      if (!input || !panel || q.length < 2 || !platform) {{
+        if (panel) panel.hidden = true;
+        return [];
+      }}
+      const response = await fetch(`/matches?platform=${{encodeURIComponent(platform)}}&q=${{encodeURIComponent(q)}}`);
+      if (!response.ok) {{
+        panel.hidden = true;
+        return [];
+      }}
+      manualMatchSuggestions = await response.json();
+      panel.innerHTML = manualMatchSuggestions.map((match, index) => `
+        <button class="match-option" type="button" data-manual-match-index="${{index}}">
+          <span>${{escapeHtml(match.title)}}</span>
+          <small>${{escapeHtml(match.release_date || "")}}</small>
+        </button>
+      `).join("");
+      panel.hidden = manualMatchSuggestions.length === 0;
+      panel.querySelectorAll("[data-manual-match-index]").forEach((button) => {{
+        button.addEventListener("mousedown", (event) => {{
+          event.preventDefault();
+          const match = manualMatchSuggestions[Number(button.dataset.manualMatchIndex)];
+          if (match) applyManualMatch(match);
+          panel.hidden = true;
         }});
       }});
+      return manualMatchSuggestions;
+    }}
+
+    function addManualReviewRow() {{
+      const rowCount = document.querySelector("[name='row_count']");
+      const platform = document.querySelector("[data-role='manual-platform']")?.value || "";
+      const playStatus = document.querySelector("[data-role='manual-play-status']")?.value || "unplayed";
+      const input = document.querySelector("[data-role='manual-title']");
+      const title = input?.value.trim() || "";
+      const exact = manualMatchSuggestions.find((match) =>
+        match.title.toLowerCase() === title.toLowerCase() && match.platform === platform
+      );
+      const match = selectedManualMatch || exact;
+      if (!rowCount || !platform || !title || !match) {{
+        alert("Choose a platform and select a matched title from the autocomplete results.");
+        return;
+      }}
+      const row = Number(rowCount.value || "0");
+      const data = {{
+        provider: match.provider,
+        provider_game_id: match.provider_game_id,
+        candidate_title: match.title,
+        matched_title: match.title,
+        platform,
+        play_status: playStatus,
+        release_date: match.release_date,
+        developer: match.developer,
+        publisher: match.publisher,
+        description: match.description,
+        cover_url: match.cover_url,
+        confidence: match.confidence,
+        notes: match.notes,
+        cover_path: match.cover_path
+      }};
+      const target = document.querySelector("[data-role='review-rows']");
+      if (!target) return;
+      target.insertAdjacentHTML("beforeend", reviewRowHtml(row, data));
+      rowCount.value = String(row + 1);
+      const newTitle = document.querySelector(`[data-row="${{row}}"][data-role="match-title-input"]`);
+      const newPlatform = document.querySelector(`[data-row="${{row}}"][data-role="row-platform-select"]`);
+      if (newTitle) installMatchInput(newTitle);
+      if (newPlatform) installPlatformSelector(newPlatform);
+      updateOutcomeCounts();
+      if (input) input.value = "";
+      selectedManualMatch = null;
+      manualMatchSuggestions = [];
+      updateManualPreview(null);
+      const panel = document.querySelector("[data-role='manual-suggestions']");
+      if (panel) panel.hidden = true;
+    }}
+
+    function installManualReview() {{
+      const input = document.querySelector("[data-role='manual-title']");
+      const platform = document.querySelector("[data-role='manual-platform']");
+      const button = document.querySelector("[data-role='manual-add']");
+      if (!input || !platform || !button) return;
+      let timer;
+      input.addEventListener("input", () => {{
+        clearTimeout(timer);
+        timer = setTimeout(loadManualMatches, 180);
+      }});
+      input.addEventListener("focus", loadManualMatches);
+      input.addEventListener("blur", () => {{
+        const exact = manualMatchSuggestions.find((match) =>
+          match.title.toLowerCase() === input.value.trim().toLowerCase() && match.platform === platform.value
+        );
+        if (exact) applyManualMatch(exact);
+        setTimeout(() => {{
+          const panel = document.querySelector("[data-role='manual-suggestions']");
+          if (panel) panel.hidden = true;
+        }}, 120);
+      }});
+      platform.addEventListener("change", () => {{
+        selectedManualMatch = null;
+        manualMatchSuggestions = [];
+        updateManualPreview(null);
+        loadManualMatches();
+      }});
+      button.addEventListener("click", addManualReviewRow);
     }}
 
     function installDecisionActions() {{
@@ -706,6 +954,7 @@ def _layout(title: str, body: str) -> bytes:
     document.addEventListener("DOMContentLoaded", () => {{
       installMatchInputs();
       installPlatformSelectors();
+      installManualReview();
       installDecisionActions();
       installImageModal();
     }});
@@ -1168,23 +1417,42 @@ class CollectionHandler(BaseHTTPRequestHandler):
         accepted = sum(1 for row in rows if row.get("decision") == "accept")
         needs_review = len(rows) - accepted
         notice = f'<div class="notice">{_h(message)}</div>' if message else ""
+        uploaded_photos = self._uploaded_photo_panel(run_id)
         return f"""
 <h1>Ingest Results</h1>
 {notice}
-<section class="panel">
-  <p><strong>{len(rows)}</strong> suggested match(es), <strong>{accepted}</strong> marked for import, <strong>{needs_review}</strong> awaiting review.</p>
-  <p class="muted">Compared detected covers against {_h(summary.get('cover_index_entries', '0'))} indexed cover images.</p>
-  <p class="muted">Provider: {_h(summary.get('provider'))} | Platform hint: {_h(summary.get('platform')) or 'none'}</p>
-</section>
+<div class="ingest-summary-grid">
+  <section class="panel">
+    <p><strong>{len(rows)}</strong> suggested match(es), <strong>{accepted}</strong> marked for import, <strong>{needs_review}</strong> awaiting review.</p>
+    <p class="muted">Compared detected covers against {_h(summary.get('cover_index_entries', '0'))} indexed cover images.</p>
+    <p class="muted">Provider: {_h(summary.get('provider'))} | Platform hint: {_h(summary.get('platform')) or 'none'}</p>
+  </section>
+  {uploaded_photos}
+</div>
 <form method="post" action="/ingest/{_h(run_id)}/review">
   {self._review_rows_table(rows)}
   <div class="actions"><button type="submit">Save And Import Accepted Rows</button><a class="button secondary" href="/ingest">Upload More Photos</a><a class="button secondary" href="/">Back To Library</a></div>
 </form>
 """
 
+    def _uploaded_photo_panel(self, run_id: str) -> str:
+        uploads_dir = self._run_dir(run_id) / "uploads"
+        photos = sorted(path for path in uploads_dir.iterdir() if path.suffix.lower() in IMAGE_SUFFIXES) if uploads_dir.exists() else []
+        if not photos:
+            return '<section class="panel"><h2>Uploaded Photos</h2><p class="muted">No uploaded photo files found for this run.</p></section>'
+        thumbs = "".join(
+            f'<button class="thumb-button" type="button" data-modal-image="/media?path={urllib.parse.quote(str(path))}">'
+            f'<img class="uploaded-photo-thumb" src="/media?path={urllib.parse.quote(str(path))}" alt="Uploaded photo {_h(path.name)}">'
+            f'</button>'
+            for path in photos
+        )
+        return f"""
+<section class="panel">
+  <h2>Uploaded Photos</h2>
+  <div class="uploaded-photos">{thumbs}</div>
+</section>"""
+
     def _review_rows_table(self, rows: list[dict[str, str]]) -> str:
-        if not rows:
-            return '<div class="panel muted">No case candidates were detected.</div>'
         grouped_rows = {"review": [], "accept": [], "ignore": []}
         cached_platforms = _cached_platform_options(self.platform_options)
 
@@ -1214,6 +1482,20 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 for status in PLAY_STATUSES
             )
             return f'<select name="row_{index}_play_status">{options}</select>'
+
+        default_platform = rows[0].get("platform", "") if rows else (cached_platforms[0] if cached_platforms else "")
+        manual_platform_options = "".join(
+            f'<option value="{_h(platform)}"{" selected" if platform == default_platform else ""}>{_h(platform)}</option>'
+            for platform in cached_platforms
+        )
+        if default_platform and default_platform not in cached_platforms:
+            manual_platform_options = (
+                f'<option value="{_h(default_platform)}" selected>{_h(default_platform)}</option>' + manual_platform_options
+            )
+        manual_play_options = "".join(
+            f'<option value="{_h(status)}"{" selected" if status == "unplayed" else ""}>{_h(status)}</option>'
+            for status in PLAY_STATUSES
+        )
 
         for index, row in enumerate(rows):
             crop = row.get("crop_path")
@@ -1293,6 +1575,28 @@ class CollectionHandler(BaseHTTPRequestHandler):
 
         return f"""
 <input type="hidden" name="row_count" value="{len(rows)}">
+<section class="manual-review panel">
+  <h2>Manual Review</h2>
+  <div class="manual-review-form">
+    <label>Platform
+      <select data-role="manual-platform">{manual_platform_options}</select>
+    </label>
+    <label>Play Status
+      <select data-role="manual-play-status">{manual_play_options}</select>
+    </label>
+    <label>Matched Title
+      <div class="match-control">
+        <input data-role="manual-title" autocomplete="off" placeholder="Start typing a title">
+        <div class="match-suggestions" data-role="manual-suggestions" hidden></div>
+      </div>
+    </label>
+    <button type="button" data-role="manual-add">Add To Review</button>
+  </div>
+  <div class="manual-preview" data-role="manual-preview" hidden>
+    <img class="crop-thumb" data-role="manual-cover" alt="Matched cached cover art" hidden>
+    <span>Selected: <strong data-role="manual-selected-title"></strong></span>
+  </div>
+</section>
 {section_table("review", "Review Queue", "No rows waiting for review.")}
 {section_table("accept", "Accepted", "No accepted rows yet.")}
 {section_table("ignore", "Ignored", "No ignored rows yet.")}

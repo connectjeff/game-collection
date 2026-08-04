@@ -170,6 +170,46 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn('value="Nintendo GameCube" selected', body)
         self.assertIn('value="PlayStation 5"', body)
 
+    def test_manual_review_section_renders_even_without_detected_rows(self) -> None:
+        with patch("game_collection.web.platform_cache_statuses") as statuses:
+            statuses.return_value = [
+                type("Status", (), {"name": "PlayStation 5", "cached": True, "count": 9})(),
+            ]
+            body = CollectionHandler._review_rows_table(CollectionHandler, [])
+
+        self.assertIn("Manual Review", body)
+        self.assertIn('data-role="manual-platform"', body)
+        self.assertIn('data-role="manual-title"', body)
+        self.assertIn('data-role="manual-add"', body)
+        self.assertIn('name="row_count" value="0"', body)
+        self.assertIn("Review Queue", body)
+        self.assertIn("No rows waiting for review.", body)
+
+    def test_ingest_results_shows_uploaded_photo_thumbnails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run-1"
+            uploads = run_dir / "uploads"
+            uploads.mkdir(parents=True)
+            (uploads / "upload-001.jpg").write_bytes(b"fake")
+            (run_dir / "audit.csv").write_text(
+                "photo_path,crop_path,candidate_title,platform,play_status,provider,provider_game_id,matched_title,release_date,developer,publisher,description,cover_url,confidence,decision,notes\n",
+                encoding="utf-8",
+            )
+            (run_dir / "summary.csv").write_text("provider,igdb\nplatform,PlayStation 5\n", encoding="utf-8")
+
+            with patch("game_collection.web.WEB_INGEST_ROOT", root):
+                with patch("game_collection.web.platform_cache_statuses") as statuses:
+                    statuses.return_value = [
+                        type("Status", (), {"name": "PlayStation 5", "cached": True, "count": 9})(),
+                    ]
+                    handler = object.__new__(CollectionHandler)
+                    body = handler._ingest_results("run-1")
+
+        self.assertIn("Uploaded Photos", body)
+        self.assertIn("upload-001.jpg", body)
+        self.assertIn("Manual Review", body)
+
     def test_review_outcome_rows_have_section_specific_actions(self) -> None:
         body = CollectionHandler._review_rows_table(
             CollectionHandler,
