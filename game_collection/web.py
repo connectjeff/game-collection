@@ -48,6 +48,41 @@ def _cached_platform_options(platforms: list[str]) -> list[str]:
     return [status.name for status in platform_cache_statuses("igdb", platforms) if status.cached]
 
 
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _cover_thumb(path: str | Path | None, label: str, alt: str) -> str:
+    if not path:
+        return '<div class="cover-sample"></div>'
+    src = urllib.parse.quote(str(path))
+    return (
+        '<div class="cover-sample">'
+        f'<img class="crop-thumb" src="/media?path={src}" alt="{_h(alt)}">'
+        f'<span class="cover-label">{_h(label)}</span>'
+        "</div>"
+    )
+
+
+def _matched_cover_path(row: dict[str, str]) -> str:
+    provider = row.get("provider")
+    platform = row.get("platform")
+    provider_game_id = row.get("provider_game_id")
+    if provider and platform and provider_game_id:
+        indexed_cover = default_index_path(provider, platform).parent / "covers" / f"{provider_game_id}.jpg"
+        if indexed_cover.exists():
+            return str(indexed_cover)
+    notes = row.get("notes", "")
+    marker = "cover_path="
+    if marker not in notes:
+        return ""
+    return notes.split(marker, 1)[1].split(";", 1)[0].strip()
+
+
 def _layout(title: str, body: str) -> bytes:
     page = f"""<!doctype html>
 <html lang="en">
@@ -216,6 +251,23 @@ def _layout(title: str, body: str) -> bytes:
       border-radius: 5px;
       background: #e2e6ea;
     }}
+    .cover-pair {{
+      display: flex;
+      gap: 10px;
+      align-items: start;
+      min-width: 190px;
+    }}
+    .cover-sample {{
+      display: grid;
+      gap: 4px;
+      justify-items: center;
+    }}
+    .cover-label {{
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }}
     @media (max-width: 760px) {{
       header, main {{ padding-left: 14px; padding-right: 14px; }}
       form.filters, .detail, .grid {{ grid-template-columns: 1fr; }}
@@ -383,9 +435,10 @@ class CollectionHandler(BaseHTTPRequestHandler):
         params = urllib.parse.parse_qs(query)
         raw_path = (params.get("path") or [""])[0]
         try:
-            base = WEB_INGEST_ROOT.resolve()
+            allowed_roots = [WEB_INGEST_ROOT.resolve(), Path("review/cover-indexes").resolve()]
             media_path = Path(raw_path).resolve()
-            media_path.relative_to(base)
+            if not any(_is_relative_to(media_path, root) for root in allowed_roots):
+                raise ValueError
         except (ValueError, OSError):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -673,23 +726,22 @@ class CollectionHandler(BaseHTTPRequestHandler):
         decision_options = ["review", "accept", "ignore"]
         for index, row in enumerate(rows):
             crop = row.get("crop_path")
-            crop_html = (
-                f'<img class="crop-thumb" src="/media?path={urllib.parse.quote(crop)}" alt="Detected crop">'
-                if crop
-                else ""
-            )
+            matched_cover = _matched_cover_path(row)
+            crop_html = _cover_thumb(crop, "Uploaded", "Detected crop from uploaded photo")
+            matched_cover_html = _cover_thumb(matched_cover, "Matched", "Matched cached cover art")
+            cover_pair_html = f'<div class="cover-pair">{crop_html}{matched_cover_html}</div>'
             options = "".join(
                 f'<option value="{decision}"{_selected(row.get("decision"), decision)}>{decision}</option>'
                 for decision in decision_options
             )
             hidden_metadata = "".join(
                 f'<input type="hidden" name="row_{index}_{field}" value="{_h(row.get(field))}">'
-                for field in ("release_date", "developer", "publisher", "description", "cover_url")
+                for field in ("release_date", "developer", "publisher", "description", "cover_url", "notes")
             )
             table_rows.append(
                 f"""
 <tr>
-  <td>{crop_html}<input type="hidden" name="row_{index}_photo_path" value="{_h(row.get('photo_path'))}"><input type="hidden" name="row_{index}_crop_path" value="{_h(crop)}"></td>
+  <td>{cover_pair_html}<input type="hidden" name="row_{index}_photo_path" value="{_h(row.get('photo_path'))}"><input type="hidden" name="row_{index}_crop_path" value="{_h(crop)}"></td>
   <td><input name="row_{index}_candidate_title" value="{_h(row.get('candidate_title'))}"></td>
   <td><input name="row_{index}_platform" value="{_h(row.get('platform'))}"></td>
   <td><input name="row_{index}_provider" value="{_h(row.get('provider'))}"></td>
@@ -697,13 +749,13 @@ class CollectionHandler(BaseHTTPRequestHandler):
   <td><input name="row_{index}_matched_title" value="{_h(row.get('matched_title'))}"></td>
   <td><input name="row_{index}_confidence" value="{_h(row.get('confidence'))}"></td>
   <td><select name="row_{index}_decision">{options}</select></td>
-  <td><input name="row_{index}_notes" value="{_h(row.get('notes'))}">{hidden_metadata}</td>
+  <td>{hidden_metadata}</td>
 </tr>"""
             )
         return f"""
 <input type="hidden" name="row_count" value="{len(rows)}">
 <table class="review-table">
-  <thead><tr><th>Crop</th><th>Detected Match</th><th>Platform</th><th>Provider</th><th>Provider ID</th><th>Matched Title</th><th>Confidence</th><th>Decision</th><th>Notes</th></tr></thead>
+  <thead><tr><th>Covers</th><th>Detected Match</th><th>Platform</th><th>Provider</th><th>Provider ID</th><th>Matched Title</th><th>Confidence</th><th>Decision</th><th></th></tr></thead>
   <tbody>{''.join(table_rows)}</tbody>
 </table>"""
 

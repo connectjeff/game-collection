@@ -94,6 +94,31 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn('name="platform" value="PlayStation 4"', body)
         self.assertIn("12 covers", body)
 
+    def test_review_table_compares_uploaded_crop_to_matched_cover(self) -> None:
+        body = CollectionHandler._review_rows_table(
+            CollectionHandler,
+            [
+                {
+                    "photo_path": "review/web-ingests/run/uploads/upload-001.jpg",
+                    "crop_path": "review/web-ingests/run/crops/upload-001-001.jpg",
+                    "candidate_title": "Metroid Prime",
+                    "platform": "Nintendo GameCube",
+                    "provider": "igdb",
+                    "provider_game_id": "123",
+                    "matched_title": "Metroid Prime",
+                    "confidence": "0.98",
+                    "decision": "review",
+                    "notes": "cover_match_distance=1; cover_path=review/cover-indexes/igdb/gamecube/covers/123.jpg",
+                }
+            ],
+        )
+
+        self.assertIn("Uploaded", body)
+        self.assertIn("Matched", body)
+        self.assertIn("review/cover-indexes/igdb/gamecube/covers/123.jpg", body)
+        self.assertNotIn("<th>Notes</th>", body)
+        self.assertIn('type="hidden" name="row_0_notes"', body)
+
     def test_upload_ingest_imports_high_confidence_match(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
