@@ -144,7 +144,7 @@ Prioritized platform presets:
 
 Use `Xbox Series X|S` for Xbox Series X games because that is the IGDB platform name used for the cover-art index.
 
-When the server starts, it caches the IGDB platform list and prebuilds cover-art indexes for the prioritized systems. You can force a refresh with:
+When the server starts, it caches the IGDB platform list and starts prebuilding cover-art indexes for the prioritized systems in the background. You can force a refresh with:
 
 ```bash
 game-collection serve --refresh-platform-cache --refresh-cover-indexes

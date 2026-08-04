@@ -4,6 +4,7 @@ import email.policy
 import mimetypes
 import html
 import sqlite3
+import threading
 import uuid
 import urllib.parse
 from email.parser import BytesParser
@@ -834,13 +835,19 @@ def serve(
         provider = get_provider("igdb")
         platform_options = build_platform_cache(provider=provider, refresh=refresh_platform_cache)
         if prebuild_cover_indexes:
-            print("Prebuilding prioritized cover indexes...")
-            for platform, count in prebuild_prioritized_cover_indexes(
-                provider=provider,
-                limit=cover_index_limit,
-                refresh=refresh_cover_indexes,
-            ).items():
-                print(f"  {platform}: {count} covers indexed")
+            def prebuild() -> None:
+                print("Prebuilding prioritized cover indexes in the background...")
+                try:
+                    for platform, count in prebuild_prioritized_cover_indexes(
+                        provider=provider,
+                        limit=cover_index_limit,
+                        refresh=refresh_cover_indexes,
+                    ).items():
+                        print(f"  {platform}: {count} covers indexed")
+                except ProviderError as exc:
+                    print(f"Warning: background cover-index prebuild failed: {exc}")
+
+            threading.Thread(target=prebuild, daemon=True).start()
     except ProviderError as exc:
         print(f"Warning: could not prebuild IGDB caches: {exc}")
     handler = type(

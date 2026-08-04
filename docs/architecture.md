@@ -105,6 +105,6 @@ Prioritized platform indexes:
 - `Xbox One`
 - `Xbox Series X|S`
 
-The web server prebuilds those four cover indexes at startup by default and caches the full IGDB platform list for the upload picklist. Matching should use local cached cover hashes during upload, not build platform indexes on demand.
+The web server starts prebuilding those four cover indexes in the background by default and caches the full IGDB platform list for the upload picklist. Matching should use local cached cover hashes during upload, not build platform indexes on demand.
 
 The `Cache Settings` web view lists all cached IGDB platforms first, then all uncached IGDB platforms alphabetically. Submitting checked platforms builds local cover-art indexes for them.
