@@ -136,6 +136,42 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn("Accepted", body)
         self.assertIn("Ignored", body)
 
+    def test_review_outcome_rows_have_section_specific_actions(self) -> None:
+        body = CollectionHandler._review_rows_table(
+            CollectionHandler,
+            [
+                {
+                    "photo_path": "photo.jpg",
+                    "crop_path": "crop.jpg",
+                    "candidate_title": "Accepted Game",
+                    "platform": "PlayStation 5",
+                    "provider": "igdb",
+                    "provider_game_id": "1",
+                    "matched_title": "Accepted Game",
+                    "decision": "accept",
+                },
+                {
+                    "photo_path": "photo.jpg",
+                    "crop_path": "crop.jpg",
+                    "candidate_title": "Ignored Game",
+                    "platform": "PlayStation 5",
+                    "provider": "igdb",
+                    "provider_game_id": "2",
+                    "matched_title": "Ignored Game",
+                    "decision": "ignore",
+                },
+            ],
+        )
+
+        accepted_row = body[body.index('data-row="0"'):body.index('data-row="1"')]
+        ignored_row = body[body.index('data-row="1"'):]
+        self.assertIn('data-action-decision="review"', accepted_row)
+        self.assertIn('data-action-decision="ignore"', accepted_row)
+        self.assertNotIn('data-action-decision="accept"', accepted_row)
+        self.assertIn('data-action-decision="review"', ignored_row)
+        self.assertIn('data-action-decision="accept"', ignored_row)
+        self.assertNotIn('data-action-decision="ignore"', ignored_row)
+
     def test_match_search_returns_cached_cover_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

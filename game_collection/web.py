@@ -1111,10 +1111,17 @@ class CollectionHandler(BaseHTTPRequestHandler):
       <button class="icon-button accept" type="button" data-row="{index}" data-action-decision="accept" title="Accept">&#10003;</button>
       <button class="icon-button ignore" type="button" data-row="{index}" data-action-decision="ignore" title="Ignore">&#10005;</button>
     </div>"""
+            elif decision == "accept":
+                action_buttons = f"""
+    <div class="decision-actions">
+      <button class="icon-button review" type="button" data-row="{index}" data-action-decision="review" title="Move to review">&#8634;</button>
+      <button class="icon-button ignore" type="button" data-row="{index}" data-action-decision="ignore" title="Ignore">&#10005;</button>
+    </div>"""
             else:
                 action_buttons = f"""
     <div class="decision-actions">
-      <button class="icon-button review" type="button" data-row="{index}" data-action-decision="review" title="Move back to review">&#8634;</button>
+      <button class="icon-button review" type="button" data-row="{index}" data-action-decision="review" title="Move to review">&#8634;</button>
+      <button class="icon-button accept" type="button" data-row="{index}" data-action-decision="accept" title="Accept">&#10003;</button>
     </div>"""
             grouped_rows[decision].append(
                 f"""
