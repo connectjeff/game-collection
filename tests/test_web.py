@@ -129,6 +129,7 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn('type="hidden" name="row_0_confidence"', body)
         self.assertIn('data-action-decision="accept"', body)
         self.assertIn('data-action-decision="ignore"', body)
+        self.assertNotIn('data-action-decision="review"', body)
         self.assertIn("Review Queue", body)
         self.assertIn("Accepted", body)
         self.assertIn("Ignored", body)
