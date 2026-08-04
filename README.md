@@ -167,6 +167,34 @@ The web UI handles the choreography:
 
 The default threshold is intentionally conservative. Lower it only if the audit CSV looks consistently correct for your photos.
 
+### Backend validation with local sample photos
+
+For detector/matcher tuning, keep real sample photos in ignored folders such as `photos/incoming/` and create a local expectations file:
+
+```bash
+game-collection validate-samples --write-template
+```
+
+Edit `review/sample-expectations.json` so each photo has:
+
+- `photo`: local image path,
+- `platform`: IGDB platform name,
+- `expected_titles`: titles visible in the image.
+
+Then run:
+
+```bash
+game-collection validate-samples
+```
+
+The command runs the backend ingestion path without the web UI, using local cover indexes for each listed platform. It writes:
+
+- `review/sample-validation/report.csv`: expected-title pass/fail rows,
+- `review/sample-validation/suggestions.csv`: every detected crop and suggested match,
+- `review/sample-validation/crops/`: generated crop images.
+
+Those files are ignored because they can reveal your real library. Commit only generic examples such as `examples/sample-expectations.example.json`.
+
 ### 4. Verify automated results
 
 After upload, the browser redirects to an ingest results page.

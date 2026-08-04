@@ -11,6 +11,11 @@ from .cover_match import build_cover_index, default_index_path
 from .photo_ingest import PhotoIngestError, image_paths, write_photo_candidates
 from .providers import GameMatch, ProviderError, get_provider
 from .review import match_to_row, read_review, write_intake_template, write_review
+from .sample_validation import (
+    load_sample_expectations,
+    validate_sample_photos,
+    write_sample_expectations_template,
+)
 from .web import serve
 
 
@@ -260,6 +265,31 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_validate_samples(args: argparse.Namespace) -> int:
+    if args.write_template:
+        write_sample_expectations_template(args.expectations)
+        print(f"Wrote sample expectations template to {args.expectations}")
+        return 0
+    provider = get_provider(args.provider)
+    expectations = load_sample_expectations(args.expectations)
+    result = validate_sample_photos(
+        expectations=expectations,
+        provider=provider,
+        report_path=args.report_out,
+        crops_dir=args.crops_dir,
+        suggestions_path=args.suggestions_out,
+        cover_index_limit=args.cover_index_limit,
+        refresh_cover_index=args.refresh_cover_index,
+        accept_threshold=args.accept_threshold,
+    )
+    print(
+        f"Validated {result.photo_count} photo(s): detected={result.detected_count}; "
+        f"expected={result.expected_count}; found={result.found_count}; "
+        f"report={result.report_path}; suggestions={result.suggestions_path}"
+    )
+    return 0 if result.found_count == result.expected_count else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="game-collection")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -370,6 +400,35 @@ def build_parser() -> argparse.ArgumentParser:
     serve_cmd.add_argument("--refresh-cover-indexes", action="store_true")
     serve_cmd.add_argument("--skip-cover-prebuild", action="store_true")
     serve_cmd.set_defaults(func=cmd_serve)
+
+    validate_samples = subparsers.add_parser(
+        "validate-samples",
+        help="Run backend cover-matching validation against local sample photo expectations",
+    )
+    validate_samples.add_argument(
+        "--expectations",
+        type=Path,
+        default=Path("review/sample-expectations.json"),
+        help="Ignored local JSON mapping sample photos to expected titles",
+    )
+    validate_samples.add_argument("--provider", default="igdb", choices=["igdb"])
+    validate_samples.add_argument("--cover-index-limit", type=int, default=1000)
+    validate_samples.add_argument("--refresh-cover-index", action="store_true")
+    validate_samples.add_argument("--accept-threshold", type=float, default=0.92)
+    validate_samples.add_argument("--crops-dir", type=Path, default=Path("review/sample-validation/crops"))
+    validate_samples.add_argument("--report-out", type=Path, default=Path("review/sample-validation/report.csv"))
+    validate_samples.add_argument(
+        "--suggestions-out",
+        type=Path,
+        default=Path("review/sample-validation/suggestions.csv"),
+        help="CSV of every detected crop and suggested match",
+    )
+    validate_samples.add_argument(
+        "--write-template",
+        action="store_true",
+        help="Write an example expectations JSON at --expectations and exit",
+    )
+    validate_samples.set_defaults(func=cmd_validate_samples)
 
     return parser
 
