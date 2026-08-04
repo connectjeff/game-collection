@@ -107,16 +107,10 @@ Best results:
 
 ### 2. Open the local web UI
 
-Install optional image/OCR dependencies:
+Install optional image-processing dependencies:
 
 ```bash
 python -m pip install -e '.[image]'
-```
-
-Install the Tesseract OCR binary separately. On macOS with Homebrew:
-
-```bash
-brew install tesseract
 ```
 
 Start the local interface:
@@ -145,8 +139,8 @@ The web UI handles the choreography:
 
 - stores uploaded photos in an ignored local run folder,
 - crops detected game cases,
-- OCRs each crop,
-- matches candidates against metadata,
+- compares each crop against an IGDB cover-art index,
+- imports the best cover-art matches when confidence is high,
 - imports rows with confidence at or above the threshold,
 - shows lower-confidence rows on the results page for correction.
 
@@ -162,7 +156,6 @@ Check:
 - skipped-existing count,
 - rows that need review,
 - detected crop thumbnails,
-- OCR title,
 - matched title,
 - provider ID,
 - confidence.
@@ -186,7 +179,7 @@ The web UI preserves an internal audit CSV under `review/web-ingests/`, but that
 
 ## Manual Review Fallback
 
-Use this when you want a CLI batch workflow, OCR is unavailable, or a photo is too messy.
+Use this when you want a CLI batch workflow, image matching is unavailable, or a photo is too messy.
 
 Put new source images here:
 
@@ -306,7 +299,7 @@ Available views:
 
 - `Library`: browse, search, and filter the full collection.
 - `Plan Next`: view owned games that are unplayed or currently being played.
-- `Upload Photos`: upload one or more source photos, trigger OCR/matching/import, and review uncertain rows.
+- `Upload Photos`: upload one or more source photos, trigger cover-art matching/import, and review uncertain rows.
 - `Game Detail`: edit metadata, ownership state, location/condition notes, sale notes, and play status.
 
 Useful edits:
@@ -341,11 +334,10 @@ The default `.gitignore` excludes those local files and keeps only placeholders 
 
 ## Current Photo Recognition Status
 
-The current OCR implementation is intentionally conservative:
+The current recognition implementation is intentionally conservative:
 
 - it detects rectangular case regions,
 - crops each case,
-- runs OCR on each crop in multiple orientations,
-- ranks metadata matches using title/platform/provider results,
+- compares each crop to indexed provider cover art using perceptual image hashes,
 - imports only high-confidence matches,
 - asks for review only when confidence is low.

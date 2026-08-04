@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-image = ["opencv-python>=4.8", "pillow>=10", "pytesseract>=0.3"]
+image = ["opencv-python>=4.8", "pillow>=10"]
 
 [project.scripts]
 game-collection = "game_collection.cli:main"

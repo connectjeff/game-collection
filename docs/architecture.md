@@ -19,9 +19,9 @@ Core requirements:
 flowchart LR
     A["Floor photo"] --> B["Case detection"]
     B --> C["Crop each case"]
-    C --> D["OCR title/spine text"]
-    D --> E["Metadata search"]
-    E --> F["Match ranking"]
+    C --> D["Cover-art image hash"]
+    K["Provider cover index"] --> F["Image similarity ranking"]
+    D --> F
     F --> G{"Confidence >= threshold?"}
     G -->|yes| H["SQLite import"]
     G -->|no| I["Audit CSV review queue"]
@@ -70,8 +70,8 @@ The photo recognizer should be optimized for accuracy over magic:
 1. Ask the user to photograph cases in a grid with minimal overlap.
 2. Detect rectangular case boundaries using OpenCV contours.
 3. Save numbered crops.
-4. Run OCR on each crop, trying rotations because spine/title orientation varies.
-5. Match OCR text plus optional platform hints against the provider.
+4. Compute an image hash for each crop.
+5. Compare the crop hash to an indexed set of provider cover-art hashes.
 6. Auto-accept only high-confidence matches.
 7. Send ambiguous results to CSV review.
 
@@ -81,7 +81,7 @@ Photo ingest lives behind optional dependencies:
 
 ```toml
 [project.optional-dependencies]
-image = ["opencv-python", "pillow", "pytesseract"]
+image = ["opencv-python", "pillow"]
 ```
 
 The primary command is:
@@ -90,9 +90,9 @@ The primary command is:
 game-collection ingest-photos photos/incoming/ --provider igdb --platform "Nintendo GameCube"
 ```
 
-It writes:
+It builds or reuses an IGDB cover-art index for the selected platform, then writes:
 
-- `review/photo-candidates.csv` for OCR output,
+- `review/photo-candidates.csv` for detected cover candidates,
 - `review/photo-ingest.audit.csv` for match/import decisions,
 - `review/crops/` for detected case crops.
 

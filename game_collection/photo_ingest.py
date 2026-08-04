@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
+from .cover_match import CoverIndexEntry, match_cover, match_to_game_match
+from .review import match_to_row
 from .review import write_review
 
 
@@ -16,41 +17,13 @@ class PhotoIngestError(RuntimeError):
 def _load_image_dependencies():
     try:
         import cv2  # type: ignore[import-not-found]
-        import pytesseract  # type: ignore[import-not-found]
         from PIL import Image  # type: ignore[import-not-found]
     except ImportError as exc:
         raise PhotoIngestError(
-            "Photo OCR requires optional image dependencies. Install with "
-            "`python -m pip install -e '.[image]'` and install the Tesseract OCR binary."
+            "Photo cover matching requires optional image dependencies. Install with "
+            "`python -m pip install -e '.[image]'`."
         ) from exc
-    return cv2, pytesseract, Image
-
-
-def _clean_ocr_title(text: str) -> str:
-    lines = []
-    for raw_line in text.splitlines():
-        line = re.sub(r"[^A-Za-z0-9: '&!?.+\\-]", " ", raw_line)
-        line = re.sub(r"\s+", " ", line).strip()
-        if len(line) >= 4 and any(ch.isalpha() for ch in line):
-            lines.append(line)
-    if not lines:
-        return ""
-    lines.sort(key=lambda item: (len(item.split()), len(item)), reverse=True)
-    return lines[0][:120]
-
-
-def _ocr_crop(pytesseract, image) -> str:
-    candidates = []
-    for angle in (0, 90, 180, 270):
-        rotated = image.rotate(angle, expand=True)
-        text = pytesseract.image_to_string(rotated, config="--psm 6")
-        cleaned = _clean_ocr_title(text)
-        if cleaned:
-            candidates.append(cleaned)
-    if not candidates:
-        return ""
-    candidates.sort(key=len, reverse=True)
-    return candidates[0]
+    return cv2, Image
 
 
 def detect_photo_candidates(
@@ -58,9 +31,11 @@ def detect_photo_candidates(
     photo_path: Path,
     crops_dir: Path,
     platform: str | None = None,
+    cover_entries: list[CoverIndexEntry] | None = None,
+    accept_threshold: float = 0.92,
     min_area_ratio: float = 0.015,
 ) -> list[dict[str, str]]:
-    cv2, pytesseract, Image = _load_image_dependencies()
+    cv2, Image = _load_image_dependencies()
     if not photo_path.exists():
         raise PhotoIngestError(f"Photo does not exist: {photo_path}")
 
@@ -93,26 +68,34 @@ def detect_photo_candidates(
         crop_path = crops_dir / f"{photo_path.stem}-{index:03d}.jpg"
         crop = pil_source.crop((x, y, x + w, y + h))
         crop.save(crop_path)
-        candidate_title = _ocr_crop(pytesseract, crop)
-        rows.append(
-            {
-                "photo_path": str(photo_path),
-                "crop_path": str(crop_path),
-                "candidate_title": candidate_title,
-                "platform": platform or "",
-                "provider": "",
-                "provider_game_id": "",
-                "matched_title": "",
-                "release_date": "",
-                "developer": "",
-                "publisher": "",
-                "description": "",
-                "cover_url": "",
-                "confidence": "",
-                "decision": "review",
-                "notes": "OCR candidate generated automatically." if candidate_title else "No OCR title detected.",
-            }
-        )
+        row = {
+            "photo_path": str(photo_path),
+            "crop_path": str(crop_path),
+            "candidate_title": "",
+            "platform": platform or "",
+            "provider": "",
+            "provider_game_id": "",
+            "matched_title": "",
+            "release_date": "",
+            "developer": "",
+            "publisher": "",
+            "description": "",
+            "cover_url": "",
+            "confidence": "",
+            "decision": "review",
+            "notes": "Detected cover rectangle; no cover index match was attempted.",
+        }
+        if cover_entries:
+            cover_match = match_cover(crop_path, cover_entries)
+            if cover_match:
+                game_match = match_to_game_match(cover_match)
+                row["candidate_title"] = game_match.title
+                row = match_to_row(row, game_match, accept_threshold=accept_threshold)
+                row["notes"] = (
+                    f"cover_match_distance={cover_match.distance}; "
+                    f"cover_path={cover_match.entry.cover_path}"
+                )
+        rows.append(row)
     return rows
 
 
@@ -122,10 +105,20 @@ def write_photo_candidates(
     out_path: Path,
     crops_dir: Path,
     platform: str | None = None,
+    cover_entries: list[CoverIndexEntry] | None = None,
+    accept_threshold: float = 0.92,
 ) -> int:
     all_rows: list[dict[str, str]] = []
     for photo_path in photo_paths:
-        all_rows.extend(detect_photo_candidates(photo_path=photo_path, crops_dir=crops_dir, platform=platform))
+        all_rows.extend(
+            detect_photo_candidates(
+                photo_path=photo_path,
+                crops_dir=crops_dir,
+                platform=platform,
+                cover_entries=cover_entries,
+                accept_threshold=accept_threshold,
+            )
+        )
     write_review(out_path, all_rows)
     return len(all_rows)
 

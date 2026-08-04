@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from . import db
-from .automation import import_accepted_rows, match_review_rows
+from .automation import import_accepted_rows
+from .cover_match import build_cover_index, default_index_path
 from .photo_ingest import PhotoIngestError, detect_photo_candidates
 from .providers import ProviderError, get_provider
 from .review import INTAKE_FIELDS, read_review, write_review
@@ -453,6 +454,9 @@ class CollectionHandler(BaseHTTPRequestHandler):
       <label>Auto-import threshold
         <input name="accept_threshold" type="number" min="0" max="1" step="0.01" value="0.92">
       </label>
+      <label>Cover index limit
+        <input name="cover_index_limit" type="number" min="1" step="1" value="1000">
+      </label>
       <label>Ownership status
         <select name="status">{status_options}</select>
       </label>
@@ -490,21 +494,35 @@ class CollectionHandler(BaseHTTPRequestHandler):
             provider = get_provider(provider_name)
             platform = fields.get("platform") or None
             accept_threshold = float(fields.get("accept_threshold") or "0.92")
+            cover_index_limit = int(fields.get("cover_index_limit") or "1000")
             status = fields.get("status") or "owned"
             played = fields.get("played") or "unplayed"
+            cover_entries = build_cover_index(
+                provider=provider,
+                platform=platform,
+                index_path=default_index_path(provider_name, platform),
+                limit=cover_index_limit,
+            )
 
             rows: list[dict[str, str]] = []
             for index, file_info in enumerate(image_files, start=1):
                 suffix = Path(file_info["filename"]).suffix.lower() or ".jpg"
                 upload_path = uploads_dir / f"upload-{index:03d}{suffix}"
                 upload_path.write_bytes(file_info["data"])
-                rows.extend(detect_photo_candidates(photo_path=upload_path, crops_dir=crops_dir, platform=platform))
+                rows.extend(
+                    detect_photo_candidates(
+                        photo_path=upload_path,
+                        crops_dir=crops_dir,
+                        platform=platform,
+                        cover_entries=cover_entries,
+                        accept_threshold=accept_threshold,
+                    )
+                )
 
-            matched_rows = match_review_rows(provider=provider, rows=rows, accept_threshold=accept_threshold)
-            write_review(self._audit_path(run_id), matched_rows)
+            write_review(self._audit_path(run_id), rows)
             imported, skipped = import_accepted_rows(
                 db_path=self.db_path,
-                rows=matched_rows,
+                rows=rows,
                 status=status,
                 played=played,
                 skip_existing=True,
@@ -518,6 +536,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 "played": played,
                 "uploaded": str(len(image_files)),
                 "candidates": str(len(rows)),
+                "cover_index_entries": str(len(cover_entries)),
                 "imported": str(imported),
                 "skipped_existing": str(skipped),
             }
@@ -553,6 +572,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
 {notice}
 <section class="panel">
   <p><strong>{_h(summary.get('imported', accepted))}</strong> imported, <strong>{_h(summary.get('skipped_existing', '0'))}</strong> skipped as existing, <strong>{needs_review}</strong> needs review.</p>
+  <p class="muted">Compared detected covers against {_h(summary.get('cover_index_entries', '0'))} indexed cover images.</p>
   <p class="muted">Provider: {_h(summary.get('provider'))} | Platform hint: {_h(summary.get('platform')) or 'none'} | Threshold: {_h(summary.get('accept_threshold'))}</p>
 </section>
 <form method="post" action="/ingest/{_h(run_id)}/review">
@@ -598,7 +618,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
         return f"""
 <input type="hidden" name="row_count" value="{len(rows)}">
 <table class="review-table">
-  <thead><tr><th>Crop</th><th>OCR Title</th><th>Platform</th><th>Provider</th><th>Provider ID</th><th>Matched Title</th><th>Confidence</th><th>Decision</th><th>Notes</th></tr></thead>
+  <thead><tr><th>Crop</th><th>Detected Match</th><th>Platform</th><th>Provider</th><th>Provider ID</th><th>Matched Title</th><th>Confidence</th><th>Decision</th><th>Notes</th></tr></thead>
   <tbody>{''.join(table_rows)}</tbody>
 </table>"""
 

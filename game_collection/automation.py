@@ -65,7 +65,8 @@ def import_accepted_rows(
     db.init_db(db_path)
     imported = 0
     skipped_existing = 0
-    with db.connect(db_path) as conn:
+    conn = db.connect(db_path)
+    try:
         for row in rows:
             if row.get("decision") != "accept":
                 continue
@@ -90,6 +91,9 @@ def import_accepted_rows(
             db.add_collection_item(conn, game_id=game_id, acquisition_status=status)
             db.add_playthrough(conn, game_id=game_id, play_status=played)
             imported += 1
+        conn.commit()
+    finally:
+        conn.close()
     return imported, skipped_existing
 
 

@@ -35,6 +35,10 @@ class MetadataProvider(Protocol):
         ...
 
 
+def _igdb_cover_url(image_id: str) -> str:
+    return f"https://images.igdb.com/igdb/image/upload/t_cover_big/{image_id}.jpg"
+
+
 def _get_json(url: str) -> dict[str, Any]:
     request = urllib.request.Request(url, headers={"User-Agent": "game-collection/0.1"})
     try:
@@ -186,6 +190,17 @@ class IgdbProvider:
         self._access_token = str(token)
         return self._access_token
 
+    def _request(self, endpoint: str, body: str) -> Any:
+        return _post_json(
+            f"{self.base_url}/{endpoint}",
+            data=body,
+            headers={
+                "Accept": "application/json",
+                "Client-ID": self.client_id,
+                "Authorization": f"Bearer {self._token()}",
+            },
+        )
+
     def search(self, title: str, platform: str | None = None, limit: int = 5) -> list[GameMatch]:
         safe_title = title.replace('"', '\\"')
         body = (
@@ -195,15 +210,7 @@ class IgdbProvider:
             " where version_parent = null;"
             f" limit {limit};"
         )
-        payload = _post_json(
-            f"{self.base_url}/games",
-            data=body,
-            headers={
-                "Accept": "application/json",
-                "Client-ID": self.client_id,
-                "Authorization": f"Bearer {self._token()}",
-            },
-        )
+        payload = self._request("games", body)
         if not isinstance(payload, list):
             raise ProviderError("IGDB search response was not a list.")
 
@@ -220,7 +227,7 @@ class IgdbProvider:
             platform_bonus = 0.1 if platform and platform.lower() in (platform_text or "").lower() else 0.0
             cover = game.get("cover") if isinstance(game.get("cover"), dict) else {}
             image_id = cover.get("image_id")
-            cover_url = f"https://images.igdb.com/igdb/image/upload/t_cover_big/{image_id}.jpg" if image_id else None
+            cover_url = _igdb_cover_url(str(image_id)) if image_id else None
             matches.append(
                 GameMatch(
                     provider=self.name,
@@ -236,6 +243,73 @@ class IgdbProvider:
                     raw=game,
                 )
             )
+        return matches
+
+    def platform_ids(self, platform: str, limit: int = 10) -> list[int]:
+        safe_platform = platform.replace('"', '\\"')
+        payload = self._request("platforms", f'fields id,name; search "{safe_platform}"; limit {limit};')
+        if not isinstance(payload, list):
+            raise ProviderError("IGDB platform response was not a list.")
+        exact = [item for item in payload if str(item.get("name", "")).casefold() == platform.casefold()]
+        candidates = exact or payload
+        return [int(item["id"]) for item in candidates if item.get("id") is not None]
+
+    def cover_index(self, *, platform: str | None = None, limit: int = 1000) -> list[GameMatch]:
+        where_parts = ["cover != null", "version_parent = null"]
+        if platform:
+            platform_ids = self.platform_ids(platform, limit=10)
+            if not platform_ids:
+                raise ProviderError(f"Could not find IGDB platform: {platform}")
+            if len(platform_ids) == 1:
+                where_parts.append(f"platforms = {platform_ids[0]}")
+            else:
+                where_parts.append(f"platforms = ({','.join(str(item) for item in platform_ids)})")
+
+        matches: list[GameMatch] = []
+        page_size = 500
+        offset = 0
+        while len(matches) < limit:
+            batch_limit = min(page_size, limit - len(matches))
+            body = (
+                "fields name,summary,first_release_date,cover.image_id,platforms.name,"
+                "involved_companies.developer,involved_companies.publisher,involved_companies.company.name;"
+                f" where {' & '.join(where_parts)};"
+                " sort total_rating_count desc;"
+                f" limit {batch_limit}; offset {offset};"
+            )
+            payload = self._request("games", body)
+            if not isinstance(payload, list):
+                raise ProviderError("IGDB cover index response was not a list.")
+            if not payload:
+                break
+            for game in payload:
+                cover = game.get("cover") if isinstance(game.get("cover"), dict) else {}
+                image_id = cover.get("image_id")
+                if not image_id:
+                    continue
+                platforms = game.get("platforms") or []
+                platform_names = [
+                    item.get("name")
+                    for item in platforms
+                    if isinstance(item, dict) and item.get("name")
+                ]
+                matches.append(
+                    GameMatch(
+                        provider=self.name,
+                        provider_game_id=str(game.get("id")),
+                        title=str(game.get("name") or ""),
+                        platform=", ".join(platform_names) or platform,
+                        release_date=_igdb_date(game.get("first_release_date")),
+                        developer=_first_company(game, "developer"),
+                        publisher=_first_company(game, "publisher"),
+                        description=game.get("summary"),
+                        cover_url=_igdb_cover_url(str(image_id)),
+                        raw=game,
+                    )
+                )
+            if len(payload) < batch_limit:
+                break
+            offset += batch_limit
         return matches
 
 

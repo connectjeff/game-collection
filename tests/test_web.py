@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from game_collection import db
+from game_collection.cover_match import CoverIndexEntry
 from game_collection.providers import GameMatch
 from game_collection.web import CollectionHandler
 
@@ -74,24 +75,47 @@ class WebIngestTests(unittest.TestCase):
             self.addCleanup(server.server_close)
             self.addCleanup(server.shutdown)
 
-            def fake_detect(*, photo_path: Path, crops_dir: Path, platform: str | None = None):
+            cover_entries = [
+                CoverIndexEntry(
+                    provider="fake",
+                    provider_game_id="metroid-prime",
+                    title="Metroid Prime",
+                    platform="Nintendo GameCube",
+                    release_date=None,
+                    developer=None,
+                    publisher=None,
+                    description=None,
+                    cover_url=None,
+                    cover_path=root / "cover.jpg",
+                    phash="0",
+                )
+            ]
+
+            def fake_detect(
+                *,
+                photo_path: Path,
+                crops_dir: Path,
+                platform: str | None = None,
+                cover_entries: list[CoverIndexEntry] | None = None,
+                accept_threshold: float = 0.92,
+            ):
                 return [
                     {
                         "photo_path": str(photo_path),
                         "crop_path": "",
                         "candidate_title": "Metroid Prime",
                         "platform": platform or "",
-                        "provider": "",
-                        "provider_game_id": "",
-                        "matched_title": "",
+                        "provider": "fake",
+                        "provider_game_id": "metroid-prime",
+                        "matched_title": "Metroid Prime",
                         "release_date": "",
                         "developer": "",
                         "publisher": "",
                         "description": "",
                         "cover_url": "",
-                        "confidence": "",
-                        "decision": "review",
-                        "notes": "",
+                        "confidence": "0.98",
+                        "decision": "accept",
+                        "notes": "cover_match_distance=1",
                     }
                 ]
 
@@ -100,6 +124,7 @@ class WebIngestTests(unittest.TestCase):
             request = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": content_type})
             with (
                 patch("game_collection.web.WEB_INGEST_ROOT", root / "web-ingests"),
+                patch("game_collection.web.build_cover_index", return_value=cover_entries),
                 patch("game_collection.web.detect_photo_candidates", side_effect=fake_detect),
                 patch("game_collection.web.get_provider", return_value=FakeProvider()),
             ):
@@ -122,7 +147,30 @@ class WebIngestTests(unittest.TestCase):
             self.addCleanup(server.server_close)
             self.addCleanup(server.shutdown)
 
-            def fake_detect(*, photo_path: Path, crops_dir: Path, platform: str | None = None):
+            cover_entries = [
+                CoverIndexEntry(
+                    provider="fake",
+                    provider_game_id="placeholder",
+                    title="Placeholder",
+                    platform="Nintendo GameCube",
+                    release_date=None,
+                    developer=None,
+                    publisher=None,
+                    description=None,
+                    cover_url=None,
+                    cover_path=root / "cover.jpg",
+                    phash="0",
+                )
+            ]
+
+            def fake_detect(
+                *,
+                photo_path: Path,
+                crops_dir: Path,
+                platform: str | None = None,
+                cover_entries: list[CoverIndexEntry] | None = None,
+                accept_threshold: float = 0.92,
+            ):
                 title = {
                     "upload-001.jpg": "Metroid Prime",
                     "upload-002.jpg": "F-Zero GX",
@@ -134,17 +182,17 @@ class WebIngestTests(unittest.TestCase):
                         "crop_path": "",
                         "candidate_title": title,
                         "platform": platform or "",
-                        "provider": "",
-                        "provider_game_id": "",
-                        "matched_title": "",
+                        "provider": "fake",
+                        "provider_game_id": title.casefold().replace(" ", "-"),
+                        "matched_title": title,
                         "release_date": "",
                         "developer": "",
                         "publisher": "",
                         "description": "",
                         "cover_url": "",
-                        "confidence": "",
-                        "decision": "review",
-                        "notes": "",
+                        "confidence": "0.98",
+                        "decision": "accept",
+                        "notes": "cover_match_distance=1",
                     }
                 ]
 
@@ -153,6 +201,7 @@ class WebIngestTests(unittest.TestCase):
             request = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": content_type})
             with (
                 patch("game_collection.web.WEB_INGEST_ROOT", root / "web-ingests"),
+                patch("game_collection.web.build_cover_index", return_value=cover_entries),
                 patch("game_collection.web.detect_photo_candidates", side_effect=fake_detect) as detect,
                 patch("game_collection.web.get_provider", return_value=FakeProvider()),
             ):

@@ -5,8 +5,9 @@ import json
 from pathlib import Path
 
 from . import db
-from .automation import auto_import_review
+from .automation import auto_import_review, import_accepted_rows
 from .config import load_dotenv
+from .cover_match import build_cover_index, default_index_path
 from .photo_ingest import PhotoIngestError, image_paths, write_photo_candidates
 from .providers import GameMatch, ProviderError, get_provider
 from .review import match_to_row, read_review, write_intake_template, write_review
@@ -167,27 +168,37 @@ def cmd_ingest_photos(args: argparse.Namespace) -> int:
     if not photos:
         print(f"No image files found in {args.path}")
         return 0
+    provider = get_provider(args.provider)
+    cover_entries = build_cover_index(
+        provider=provider,
+        platform=args.platform,
+        index_path=args.cover_index,
+        limit=args.cover_index_limit,
+        refresh=args.refresh_cover_index,
+    )
     candidate_count = write_photo_candidates(
         photo_paths=photos,
         out_path=args.candidates_out,
         crops_dir=args.crops_dir,
         platform=args.platform,
-    )
-    provider = get_provider(args.provider)
-    result = auto_import_review(
-        db_path=args.db,
-        review_csv=args.candidates_out,
-        provider=provider,
-        audit_path=args.audit_out,
+        cover_entries=cover_entries,
         accept_threshold=args.accept_threshold,
+    )
+    rows = read_review(args.candidates_out)
+    write_review(args.audit_out, rows)
+    imported, skipped_existing = import_accepted_rows(
+        db_path=args.db,
+        rows=rows,
         status=args.status,
         played=args.played,
         skip_existing=not args.allow_duplicates,
     )
+    needs_review = sum(1 for row in rows if row.get("decision") != "accept")
     print(
         f"Detected {candidate_count} candidates from {len(photos)} photo(s). "
-        f"Imported {result.imported}; skipped_existing={result.skipped_existing}; "
-        f"needs_review={result.needs_review}; candidates={args.candidates_out}; audit={result.audit_path}"
+        f"Cover index entries={len(cover_entries)}. "
+        f"Imported {imported}; skipped_existing={skipped_existing}; "
+        f"needs_review={needs_review}; candidates={args.candidates_out}; audit={args.audit_out}"
     )
     return 0
 
@@ -299,11 +310,14 @@ def build_parser() -> argparse.ArgumentParser:
     auto_import.add_argument("--allow-duplicates", action="store_true")
     auto_import.set_defaults(func=cmd_auto_import_review)
 
-    ingest_photos = subparsers.add_parser("ingest-photos", help="OCR photos, match metadata, and import high-confidence games")
+    ingest_photos = subparsers.add_parser("ingest-photos", help="Match uploaded cover photos to provider cover art")
     _add_db_arg(ingest_photos)
     ingest_photos.add_argument("path", type=Path, help="Image file or folder of image files")
     ingest_photos.add_argument("--provider", default="igdb", choices=PROVIDER_CHOICES)
     ingest_photos.add_argument("--platform")
+    ingest_photos.add_argument("--cover-index", type=Path, default=None)
+    ingest_photos.add_argument("--cover-index-limit", type=int, default=1000)
+    ingest_photos.add_argument("--refresh-cover-index", action="store_true")
     ingest_photos.add_argument("--candidates-out", type=Path, default=Path("review/photo-candidates.csv"))
     ingest_photos.add_argument("--audit-out", type=Path, default=Path("review/photo-ingest.audit.csv"))
     ingest_photos.add_argument("--crops-dir", type=Path, default=Path("review/crops"))
@@ -352,6 +366,8 @@ def main() -> int:
     load_dotenv()
     parser = build_parser()
     args = parser.parse_args()
+    if getattr(args, "cover_index", None) is None and getattr(args, "command", None) == "ingest-photos":
+        args.cover_index = default_index_path(args.provider, args.platform)
     try:
         return args.func(args)
     except (ProviderError, PhotoIngestError) as exc:
