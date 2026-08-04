@@ -274,7 +274,7 @@ class IgdbProvider:
             offset += batch_limit
         return platforms
 
-    def cover_index(self, *, platform: str | None = None, limit: int = 1000) -> list[GameMatch]:
+    def cover_index(self, *, platform: str | None = None, limit: int | None = None) -> list[GameMatch]:
         where_parts = ["cover != null", "version_parent = null"]
         if platform:
             platform_ids = self.platform_ids(platform, limit=10)
@@ -286,15 +286,16 @@ class IgdbProvider:
                 where_parts.append(f"platforms = ({','.join(str(item) for item in platform_ids)})")
 
         matches: list[GameMatch] = []
+        seen_game_ids: set[str] = set()
         page_size = 500
         offset = 0
-        while len(matches) < limit:
-            batch_limit = min(page_size, limit - len(matches))
+        while limit is None or len(matches) < limit:
+            batch_limit = page_size if limit is None else min(page_size, limit - len(matches))
             body = (
                 "fields name,summary,first_release_date,cover.image_id,platforms.name,"
                 "involved_companies.developer,involved_companies.publisher,involved_companies.company.name;"
                 f" where {' & '.join(where_parts)};"
-                " sort total_rating_count desc;"
+                " sort id asc;"
                 f" limit {batch_limit}; offset {offset};"
             )
             payload = self._request("games", body)
@@ -303,6 +304,10 @@ class IgdbProvider:
             if not payload:
                 break
             for game in payload:
+                game_id = str(game.get("id"))
+                if game_id in seen_game_ids:
+                    continue
+                seen_game_ids.add(game_id)
                 cover = game.get("cover") if isinstance(game.get("cover"), dict) else {}
                 image_id = cover.get("image_id")
                 if not image_id:
@@ -316,7 +321,7 @@ class IgdbProvider:
                 matches.append(
                     GameMatch(
                         provider=self.name,
-                        provider_game_id=str(game.get("id")),
+                        provider_game_id=game_id,
                         title=str(game.get("name") or ""),
                         platform=", ".join(platform_names) or platform,
                         release_date=_igdb_date(game.get("first_release_date")),

@@ -22,6 +22,7 @@ from .cover_match import (
     default_index_path,
     platform_cache_statuses,
     prebuild_prioritized_cover_indexes,
+    read_cover_index,
 )
 from .photo_ingest import PhotoIngestError, detect_photo_candidates
 from .providers import ProviderError, get_provider
@@ -41,6 +42,10 @@ def _h(value: Any) -> str:
 
 def _selected(left: str | None, right: str) -> str:
     return " selected" if left == right else ""
+
+
+def _cached_platform_options(platforms: list[str]) -> list[str]:
+    return [status.name for status in platform_cache_statuses("igdb", platforms) if status.cached]
 
 
 def _layout(title: str, body: str) -> bytes:
@@ -469,9 +474,6 @@ class CollectionHandler(BaseHTTPRequestHandler):
 <section class="panel">
   <p class="muted">Choose platforms to build local cover-art image indexes for. Cached platforms are listed first; uncached platforms are alphabetical.</p>
   <form method="post" action="/caches">
-    <label>Cover index limit
-      <input name="cover_index_limit" type="number" min="1" step="1" value="1000">
-    </label>
     <table>
       <thead><tr><th></th><th>Platform</th><th>Status</th></tr></thead>
       <tbody>{''.join(rows)}</tbody>
@@ -484,7 +486,6 @@ class CollectionHandler(BaseHTTPRequestHandler):
     def _handle_cache_settings(self) -> None:
         form = urllib.parse.parse_qs(self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8"))
         selected = [item for item in form.get("platform", []) if item]
-        limit = int((form.get("cover_index_limit") or ["1000"])[-1])
         if not selected:
             self._send_html("Cache Settings", self._cache_settings("Choose at least one platform.", error=True))
             return
@@ -496,7 +497,8 @@ class CollectionHandler(BaseHTTPRequestHandler):
                     provider=provider,
                     platform=platform,
                     index_path=default_index_path("igdb", platform),
-                    limit=limit,
+                    limit=None,
+                    refresh=True,
                 )
                 built.append(f"{platform}: {len(entries)} covers")
             self._send_html("Cache Settings", self._cache_settings("Built indexes for " + "; ".join(built)))
@@ -506,9 +508,15 @@ class CollectionHandler(BaseHTTPRequestHandler):
     def _ingest_form(self, message: str | None = None, *, error: bool = False) -> str:
         notice = f'<div class="notice{" error" if error else ""}">{_h(message)}</div>' if message else ""
         provider_options = "".join(f'<option value="{provider}">{provider}</option>' for provider in PROVIDER_CHOICES)
+        cached_platforms = _cached_platform_options(self.platform_options)
         platform_options = "".join(
             f'<option value="{_h(platform)}">{_h(platform)}</option>'
-            for platform in self.platform_options
+            for platform in cached_platforms
+        )
+        platform_control = (
+            f'<select name="platform" required>{platform_options}</select>'
+            if cached_platforms
+            else '<select name="platform" required disabled><option value="">No cached platforms</option></select>'
         )
         status_options = "".join(f'<option value="{status}">{status}</option>' for status in OWNERSHIP_STATUSES)
         played_options = "".join(f'<option value="{status}">{status}</option>' for status in PLAY_STATUSES)
@@ -525,13 +533,10 @@ class CollectionHandler(BaseHTTPRequestHandler):
         <select name="provider">{provider_options}</select>
       </label>
       <label>Platform hint
-        <select name="platform" required>{platform_options}</select>
+        {platform_control}
       </label>
       <label>Auto-import threshold
         <input name="accept_threshold" type="number" min="0" max="1" step="0.01" value="0.92">
-      </label>
-      <label>Cover index limit
-        <input name="cover_index_limit" type="number" min="1" step="1" value="1000">
       </label>
       <label>Ownership status
         <select name="status">{status_options}</select>
@@ -570,15 +575,19 @@ class CollectionHandler(BaseHTTPRequestHandler):
             provider = get_provider(provider_name)
             platform = fields.get("platform") or None
             accept_threshold = float(fields.get("accept_threshold") or "0.92")
-            cover_index_limit = int(fields.get("cover_index_limit") or "1000")
             status = fields.get("status") or "owned"
             played = fields.get("played") or "unplayed"
-            cover_entries = build_cover_index(
-                provider=provider,
-                platform=platform,
-                index_path=default_index_path(provider_name, platform),
-                limit=cover_index_limit,
-            )
+            if not platform:
+                self._send_html("Upload Photos", self._ingest_form("Choose a cached platform.", error=True))
+                return
+            cover_entries = read_cover_index(default_index_path(provider_name, platform))
+            if not cover_entries:
+                self._send_html(
+                    "Upload Photos",
+                    self._ingest_form(f"Build the cover index for {platform} before uploading photos.", error=True),
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
 
             rows: list[dict[str, str]] = []
             for index, file_info in enumerate(image_files, start=1):
@@ -827,7 +836,6 @@ def serve(
     prebuild_cover_indexes: bool = True,
     refresh_cover_indexes: bool = False,
     refresh_platform_cache: bool = False,
-    cover_index_limit: int = 1000,
 ) -> None:
     db.init_db(db_path)
     platform_options = PLATFORM_PRESETS
@@ -840,7 +848,7 @@ def serve(
                 try:
                     for platform, count in prebuild_prioritized_cover_indexes(
                         provider=provider,
-                        limit=cover_index_limit,
+                        limit=None,
                         refresh=refresh_cover_indexes,
                     ).items():
                         print(f"  {platform}: {count} covers indexed")

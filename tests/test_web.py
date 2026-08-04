@@ -11,7 +11,7 @@ from unittest.mock import patch
 from game_collection import db
 from game_collection.cover_match import CoverIndexEntry
 from game_collection.providers import GameMatch
-from game_collection.web import CollectionHandler, PLATFORM_PRESETS
+from game_collection.web import CollectionHandler
 
 
 class FakeProvider:
@@ -64,11 +64,17 @@ def multipart_body(filenames: list[str] | None = None) -> tuple[bytes, str]:
 
 
 class WebIngestTests(unittest.TestCase):
-    def test_upload_form_includes_prioritized_platform_presets(self) -> None:
-        body = CollectionHandler._ingest_form(CollectionHandler)
+    def test_upload_form_includes_only_cached_platforms(self) -> None:
+        with patch("game_collection.web.platform_cache_statuses") as statuses:
+            statuses.return_value = [
+                type("Status", (), {"name": "PlayStation 5", "cached": True, "count": 12})(),
+                type("Status", (), {"name": "PlayStation 4", "cached": False, "count": 0})(),
+            ]
+            body = CollectionHandler._ingest_form(CollectionHandler)
 
-        for platform in PLATFORM_PRESETS:
-            self.assertIn(f'<option value="{platform}">{platform}</option>', body)
+        self.assertIn('<option value="PlayStation 5">PlayStation 5</option>', body)
+        self.assertNotIn('<option value="PlayStation 4">PlayStation 4</option>', body)
+        self.assertNotIn("Cover index limit", body)
 
     def test_cache_settings_page_lists_platform_checkboxes(self) -> None:
         handler = type(
@@ -148,7 +154,7 @@ class WebIngestTests(unittest.TestCase):
             request = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": content_type})
             with (
                 patch("game_collection.web.WEB_INGEST_ROOT", root / "web-ingests"),
-                patch("game_collection.web.build_cover_index", return_value=cover_entries),
+                patch("game_collection.web.read_cover_index", return_value=cover_entries),
                 patch("game_collection.web.detect_photo_candidates", side_effect=fake_detect),
                 patch("game_collection.web.get_provider", return_value=FakeProvider()),
             ):
@@ -225,7 +231,7 @@ class WebIngestTests(unittest.TestCase):
             request = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": content_type})
             with (
                 patch("game_collection.web.WEB_INGEST_ROOT", root / "web-ingests"),
-                patch("game_collection.web.build_cover_index", return_value=cover_entries),
+                patch("game_collection.web.read_cover_index", return_value=cover_entries),
                 patch("game_collection.web.detect_photo_candidates", side_effect=fake_detect) as detect,
                 patch("game_collection.web.get_provider", return_value=FakeProvider()),
             ):

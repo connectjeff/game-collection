@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import re
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -140,7 +141,7 @@ def download_cover(url: str, out_path: Path) -> bool:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, headers={"User-Agent": "game-collection/0.1"})
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(request, timeout=5) as response:
             out_path.write_bytes(response.read())
         return True
     except OSError:
@@ -200,7 +201,7 @@ def build_platform_cache(
 def prebuild_prioritized_cover_indexes(
     *,
     provider: MetadataProvider,
-    limit: int = 1000,
+    limit: int | None = None,
     refresh: bool = False,
 ) -> dict[str, int]:
     results: dict[str, int] = {}
@@ -230,7 +231,7 @@ def build_cover_index(
     provider: MetadataProvider,
     platform: str | None,
     index_path: Path,
-    limit: int = 1000,
+    limit: int | None = None,
     refresh: bool = False,
 ) -> list[CoverIndexEntry]:
     if index_path.exists() and not refresh:
@@ -239,32 +240,34 @@ def build_cover_index(
         raise ProviderError("Cover-art indexing currently supports IGDB only.")
 
     covers_dir = index_path.parent / "covers"
-    entries: list[CoverIndexEntry] = []
-    for match in provider.cover_index(platform=platform, limit=limit):
+    matches = provider.cover_index(platform=platform, limit=limit)
+
+    def index_match(match: GameMatch) -> CoverIndexEntry | None:
         if not match.cover_url:
-            continue
+            return None
         cover_path = covers_dir / f"{match.provider_game_id}.jpg"
         if not cover_path.exists() and not download_cover(match.cover_url, cover_path):
-            continue
+            return None
         try:
             phash = phash_path(cover_path)
         except OSError:
-            continue
-        entries.append(
-            CoverIndexEntry(
-                provider=match.provider,
-                provider_game_id=match.provider_game_id,
-                title=match.title,
-                platform=match.platform,
-                release_date=match.release_date,
-                developer=match.developer,
-                publisher=match.publisher,
-                description=match.description,
-                cover_url=match.cover_url,
-                cover_path=cover_path,
-                phash=phash,
-            )
+            return None
+        return CoverIndexEntry(
+            provider=match.provider,
+            provider_game_id=match.provider_game_id,
+            title=match.title,
+            platform=match.platform,
+            release_date=match.release_date,
+            developer=match.developer,
+            publisher=match.publisher,
+            description=match.description,
+            cover_url=match.cover_url,
+            cover_path=cover_path,
+            phash=phash,
         )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        entries = [entry for entry in executor.map(index_match, matches) if entry is not None]
     write_cover_index(index_path, entries)
     return entries
 

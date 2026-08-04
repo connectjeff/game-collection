@@ -115,7 +115,7 @@ def validate_sample_photos(
     report_path: Path,
     crops_dir: Path,
     suggestions_path: Path | None = None,
-    cover_index_limit: int = 1000,
+    cover_index_limit: int | None = None,
     refresh_cover_index: bool = False,
     accept_threshold: float = 0.92,
 ) -> SampleValidationResult:

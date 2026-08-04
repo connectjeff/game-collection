@@ -128,7 +128,7 @@ Use the upload form to choose one or more photos directly from your computer or 
 Set:
 
 - metadata provider, usually `igdb`,
-- platform from the IGDB-backed picklist,
+- platform from the cached IGDB cover-index picklist,
 - auto-import threshold, default `0.92`,
 - ownership status,
 - initial play status.
@@ -144,7 +144,9 @@ Prioritized platform presets:
 
 Use `Xbox Series X|S` for Xbox Series X games because that is the IGDB platform name used for the cover-art index.
 
-When the server starts, it caches the IGDB platform list and starts prebuilding cover-art indexes for the prioritized systems in the background. You can force a refresh with:
+The upload platform selector only shows platforms that already have a local cover-art index. Use `Cache Settings` to choose platforms and build complete local indexes for them.
+
+When the server starts, it caches the IGDB platform list and starts prebuilding complete cover-art indexes for the prioritized systems in the background. You can force a refresh with:
 
 ```bash
 game-collection serve --refresh-platform-cache --refresh-cover-indexes
@@ -160,7 +162,7 @@ The web UI handles the choreography:
 
 - stores uploaded photos in an ignored local run folder,
 - crops detected game cases,
-- compares each crop against an IGDB cover-art index,
+- compares each crop against an already-cached IGDB cover-art index,
 - imports the best cover-art matches when confidence is high,
 - imports rows with confidence at or above the threshold,
 - shows lower-confidence rows on the results page for correction.
@@ -348,8 +350,8 @@ Available views:
 
 - `Library`: browse, search, and filter the full collection.
 - `Plan Next`: view owned games that are unplayed or currently being played.
-- `Upload Photos`: upload one or more source photos, trigger cover-art matching/import, and review uncertain rows.
-- `Cache Settings`: choose which IGDB platforms should have local cover-art indexes. Cached platforms appear first, followed by uncached platforms alphabetically.
+- `Upload Photos`: upload one or more source photos, trigger cover-art matching/import against cached platforms, and review uncertain rows.
+- `Cache Settings`: choose which IGDB platforms should have complete local cover-art indexes. Cached platforms appear first, followed by uncached platforms alphabetically.
 - `Game Detail`: edit metadata, ownership state, location/condition notes, sale notes, and play status.
 
 Useful edits:
