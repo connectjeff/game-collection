@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import email.policy
+import json
 import mimetypes
 import html
 import sqlite3
@@ -48,6 +49,10 @@ def _cached_platform_options(platforms: list[str]) -> list[str]:
     return [status.name for status in platform_cache_statuses("igdb", platforms) if status.cached]
 
 
+def _normalize_title(value: str) -> str:
+    return "".join(char.casefold() for char in value if char.isalnum())
+
+
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -56,13 +61,36 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
-def _cover_thumb(path: str | Path | None, label: str, alt: str) -> str:
+def _cover_thumb(
+    path: str | Path | None,
+    label: str,
+    alt: str,
+    *,
+    row_index: int | None = None,
+    role: str | None = None,
+) -> str:
+    sample_attrs = ""
+    image_attrs = ""
+    if row_index is not None:
+        sample_attrs += f' data-row="{row_index}"'
+        image_attrs += f' data-row="{row_index}"'
+    if role:
+        sample_attrs += f' data-role="{_h(role)}"'
+        image_role = role.removesuffix("-sample")
+        image_attrs += f' data-role="{_h(image_role)}"'
     if not path:
-        return '<div class="cover-sample"></div>'
+        hidden = " hidden" if role == "matched-cover-sample" else ""
+        image_hidden = " hidden" if role == "matched-cover-sample" else ""
+        return (
+            f'<div class="cover-sample"{sample_attrs}{hidden}>'
+            f'<img class="crop-thumb"{image_attrs}{image_hidden} alt="{_h(alt)}">'
+            f'<span class="cover-label">{_h(label)}</span>'
+            "</div>"
+        )
     src = urllib.parse.quote(str(path))
     return (
-        '<div class="cover-sample">'
-        f'<img class="crop-thumb" src="/media?path={src}" alt="{_h(alt)}">'
+        f'<div class="cover-sample"{sample_attrs}>'
+        f'<img class="crop-thumb" src="/media?path={src}" alt="{_h(alt)}"{image_attrs}>'
         f'<span class="cover-label">{_h(label)}</span>'
         "</div>"
     )
@@ -241,7 +269,103 @@ def _layout(title: str, body: str) -> bytes:
       max-width: 760px;
     }}
     .review-table input, .review-table select {{
-      min-width: 130px;
+      min-width: 0;
+    }}
+    .review-table textarea {{
+      min-width: 0;
+      min-height: 64px;
+      resize: vertical;
+      line-height: 1.3;
+    }}
+    .title-field {{
+      overflow-wrap: anywhere;
+    }}
+    .review-table {{
+      table-layout: fixed;
+    }}
+    .review-table th:nth-child(1), .review-table td:nth-child(1) {{ width: 210px; }}
+    .review-table th:nth-child(2), .review-table td:nth-child(2) {{ width: 20%; }}
+    .review-table th:nth-child(3), .review-table td:nth-child(3) {{ width: 16%; }}
+    .review-table th:nth-child(4), .review-table td:nth-child(4) {{ width: auto; }}
+    .review-table th:nth-child(5), .review-table td:nth-child(5) {{ width: 120px; }}
+    .review-table th:nth-child(6), .review-table td:nth-child(6) {{ width: 1px; padding-left: 0; padding-right: 0; }}
+    .decision-actions {{
+      display: flex;
+      gap: 6px;
+      justify-content: flex-end;
+    }}
+    .icon-button {{
+      width: 34px;
+      height: 34px;
+      display: inline-grid;
+      place-items: center;
+      padding: 0;
+      border-radius: 6px;
+      font-size: 17px;
+      line-height: 1;
+    }}
+    .icon-button.accept {{
+      background: var(--accent);
+      color: #fff;
+    }}
+    .icon-button.ignore {{
+      background: #ece3db;
+      color: var(--warn);
+    }}
+    .icon-button.review {{
+      background: #e7ebef;
+      color: var(--text);
+    }}
+    .outcome-section {{
+      margin-top: 22px;
+    }}
+    .empty-state {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      padding: 14px;
+    }}
+    .empty-state[hidden] {{ display: none; }}
+    .match-control {{
+      position: relative;
+    }}
+    .match-suggestions {{
+      position: absolute;
+      z-index: 4;
+      left: 0;
+      right: 0;
+      top: calc(100% + 4px);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      box-shadow: 0 8px 22px rgba(20, 31, 42, 0.14);
+      max-height: 260px;
+      overflow-y: auto;
+    }}
+    .match-suggestions[hidden] {{ display: none; }}
+    .match-option {{
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      width: 100%;
+      border: 0;
+      border-radius: 0;
+      background: #fff;
+      color: var(--text);
+      padding: 8px 10px;
+      text-align: left;
+      font-weight: 600;
+      white-space: normal;
+    }}
+    .match-option:hover, .match-option:focus {{
+      background: var(--accent-weak);
+      color: var(--text);
+      outline: 0;
+    }}
+    .match-option small {{
+      color: var(--muted);
+      font-weight: 500;
     }}
     .crop-thumb {{
       width: 86px;
@@ -275,8 +399,146 @@ def _layout(title: str, body: str) -> bytes:
       thead {{ display: none; }}
       tr {{ border-bottom: 1px solid var(--line); padding: 8px 0; }}
       td {{ border: 0; padding: 5px 12px; }}
+      .review-table tr {{
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        margin-bottom: 12px;
+      }}
+      .review-table td {{
+        padding: 8px 12px;
+      }}
+      .cover-pair {{ min-width: 0; }}
     }}
   </style>
+  <script>
+    const matchSuggestionState = new Map();
+
+    function setField(row, field, value) {{
+      const element = document.querySelector(`[name="row_${{row}}_${{field}}"]`);
+      if (element) element.value = value || "";
+    }}
+
+    function setMatchedCover(row, src) {{
+      const image = document.querySelector(`[data-row="${{row}}"][data-role="matched-cover"]`);
+      const sample = document.querySelector(`[data-row="${{row}}"][data-role="matched-cover-sample"]`);
+      if (!image || !sample) return;
+      if (src) {{
+        image.src = `/media?path=${{encodeURIComponent(src)}}`;
+        image.hidden = false;
+        sample.hidden = false;
+      }} else {{
+        image.removeAttribute("src");
+        image.hidden = true;
+        sample.hidden = true;
+      }}
+    }}
+
+    function applyMatch(row, match) {{
+      setField(row, "provider", match.provider);
+      setField(row, "provider_game_id", match.provider_game_id);
+      setField(row, "matched_title", match.title);
+      setField(row, "release_date", match.release_date);
+      setField(row, "developer", match.developer);
+      setField(row, "publisher", match.publisher);
+      setField(row, "description", match.description);
+      setField(row, "cover_url", match.cover_url);
+      setField(row, "confidence", match.confidence);
+      setField(row, "notes", match.notes);
+      setMatchedCover(row, match.cover_path);
+    }}
+
+    function updateOutcomeCounts() {{
+      ["review", "accept", "ignore"].forEach((decision) => {{
+        const tableBody = document.querySelector(`[data-role="${{decision}}-rows"]`);
+        const empty = document.querySelector(`[data-role="${{decision}}-empty"]`);
+        const count = tableBody ? tableBody.querySelectorAll("tr").length : 0;
+        if (empty) empty.hidden = count !== 0;
+        document.querySelectorAll(`[data-role="${{decision}}-count"]`).forEach((target) => {{
+          target.textContent = String(count);
+        }});
+      }});
+    }}
+
+    function moveReviewRow(row, decision) {{
+      const tableRow = document.querySelector(`tr[data-row="${{row}}"]`);
+      const target = document.querySelector(`[data-role="${{decision}}-rows"]`);
+      if (!tableRow || !target) return;
+      setField(row, "decision", decision);
+      tableRow.dataset.decision = decision;
+      target.appendChild(tableRow);
+      updateOutcomeCounts();
+    }}
+
+    async function loadMatches(input) {{
+      const row = input.dataset.row;
+      const platform = document.querySelector(`[name="row_${{row}}_platform"]`)?.value || "";
+      const q = input.value.trim();
+      const panel = document.querySelector(`[data-row="${{row}}"][data-role="match-suggestions"]`);
+      if (!panel || q.length < 2 || !platform) {{
+        if (panel) panel.hidden = true;
+        return [];
+      }}
+      const response = await fetch(`/matches?platform=${{encodeURIComponent(platform)}}&q=${{encodeURIComponent(q)}}`);
+      if (!response.ok) {{
+        panel.hidden = true;
+        return [];
+      }}
+      const matches = await response.json();
+      matchSuggestionState.set(row, matches);
+      panel.innerHTML = matches.map((match, index) => `
+        <button class="match-option" type="button" data-row="${{row}}" data-index="${{index}}">
+          <span>${{match.title}}</span>
+          <small>${{match.release_date || ""}}</small>
+        </button>
+      `).join("");
+      panel.hidden = matches.length === 0;
+      panel.querySelectorAll(".match-option").forEach((button) => {{
+        button.addEventListener("mousedown", (event) => {{
+          event.preventDefault();
+          const selected = matchSuggestionState.get(row)?.[Number(button.dataset.index)];
+          if (selected) applyMatch(row, selected);
+          panel.hidden = true;
+        }});
+      }});
+      return matches;
+    }}
+
+    function installMatchInputs() {{
+      document.querySelectorAll("[data-role='match-title-input']").forEach((input) => {{
+        let timer;
+        input.addEventListener("input", () => {{
+          clearTimeout(timer);
+          timer = setTimeout(() => loadMatches(input), 180);
+        }});
+        input.addEventListener("focus", () => loadMatches(input));
+        input.addEventListener("blur", () => {{
+          const row = input.dataset.row;
+          const matches = matchSuggestionState.get(row) || [];
+          const exact = matches.find((match) => match.title.toLowerCase() === input.value.trim().toLowerCase());
+          if (exact) applyMatch(row, exact);
+          setTimeout(() => {{
+            const panel = document.querySelector(`[data-row="${{row}}"][data-role="match-suggestions"]`);
+            if (panel) panel.hidden = true;
+          }}, 120);
+        }});
+      }});
+    }}
+
+    function installDecisionActions() {{
+      document.querySelectorAll("[data-action-decision]").forEach((button) => {{
+        button.addEventListener("click", () => {{
+          moveReviewRow(button.dataset.row, button.dataset.actionDecision);
+        }});
+      }});
+      updateOutcomeCounts();
+    }}
+
+    document.addEventListener("DOMContentLoaded", () => {{
+      installMatchInputs();
+      installDecisionActions();
+    }});
+  </script>
 </head>
 <body>
   <header>
@@ -360,6 +622,9 @@ class CollectionHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/caches":
             self._send_html("Cache Settings", self._cache_settings())
+            return
+        if parsed.path == "/matches":
+            self._send_matches(parsed.query)
             return
         if parsed.path.startswith("/ingest/"):
             run_id = parsed.path.removeprefix("/ingest/").strip("/")
@@ -452,6 +717,48 @@ class CollectionHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+    def _send_json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
+        data = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_matches(self, query: str) -> None:
+        params = urllib.parse.parse_qs(query)
+        q = (params.get("q") or [""])[0].strip()
+        platform = (params.get("platform") or [""])[0].strip()
+        if len(q) < 2 or not platform:
+            self._send_json([])
+            return
+        entries = read_cover_index(default_index_path("igdb", platform))
+        normalized_query = _normalize_title(q)
+        matches = []
+        for entry in entries:
+            normalized_title = _normalize_title(entry.title)
+            if normalized_query not in normalized_title:
+                continue
+            matches.append(
+                {
+                    "provider": entry.provider,
+                    "provider_game_id": entry.provider_game_id,
+                    "title": entry.title,
+                    "platform": entry.platform or platform,
+                    "release_date": entry.release_date or "",
+                    "developer": entry.developer or "",
+                    "publisher": entry.publisher or "",
+                    "description": entry.description or "",
+                    "cover_url": entry.cover_url or "",
+                    "cover_path": str(entry.cover_path),
+                    "confidence": "",
+                    "notes": json.dumps({"manual_match": True, "cover_index_path": str(entry.cover_path)}, ensure_ascii=True),
+                }
+            )
+            if len(matches) >= 8:
+                break
+        self._send_json(matches)
 
     def _collection(self, query: str) -> str:
         params = urllib.parse.parse_qs(query)
@@ -588,9 +895,6 @@ class CollectionHandler(BaseHTTPRequestHandler):
       <label>Platform hint
         {platform_control}
       </label>
-      <label>Auto-import threshold
-        <input name="accept_threshold" type="number" min="0" max="1" step="0.01" value="0.92">
-      </label>
       <label>Ownership status
         <select name="status">{status_options}</select>
       </label>
@@ -611,6 +915,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
 
     def _handle_ingest_upload(self) -> None:
         try:
+            db.init_db(self.db_path)
             fields, files = self._multipart_form()
             image_files = [item for item in files if item["name"] == "photos" and item["data"]]
             if not image_files:
@@ -627,7 +932,6 @@ class CollectionHandler(BaseHTTPRequestHandler):
             provider_name = fields.get("provider", "igdb")
             provider = get_provider(provider_name)
             platform = fields.get("platform") or None
-            accept_threshold = float(fields.get("accept_threshold") or "0.92")
             status = fields.get("status") or "owned"
             played = fields.get("played") or "unplayed"
             if not platform:
@@ -653,30 +957,24 @@ class CollectionHandler(BaseHTTPRequestHandler):
                         crops_dir=crops_dir,
                         platform=platform,
                         cover_entries=cover_entries,
-                        accept_threshold=accept_threshold,
+                        accept_threshold=2.0,
                     )
                 )
+            for row in rows:
+                row["decision"] = "review"
 
             write_review(self._audit_path(run_id), rows)
-            imported, skipped = import_accepted_rows(
-                db_path=self.db_path,
-                rows=rows,
-                status=status,
-                played=played,
-                skip_existing=True,
-            )
 
             summary = {
                 "provider": provider_name,
                 "platform": platform or "",
-                "accept_threshold": str(accept_threshold),
                 "status": status,
                 "played": played,
                 "uploaded": str(len(image_files)),
                 "candidates": str(len(rows)),
                 "cover_index_entries": str(len(cover_entries)),
-                "imported": str(imported),
-                "skipped_existing": str(skipped),
+                "imported": "0",
+                "skipped_existing": "0",
             }
             (run_dir / "summary.csv").write_text(
                 "\n".join(f"{key},{value}" for key, value in summary.items()),
@@ -709,9 +1007,9 @@ class CollectionHandler(BaseHTTPRequestHandler):
 <h1>Ingest Results</h1>
 {notice}
 <section class="panel">
-  <p><strong>{_h(summary.get('imported', accepted))}</strong> imported, <strong>{_h(summary.get('skipped_existing', '0'))}</strong> skipped as existing, <strong>{needs_review}</strong> needs review.</p>
+  <p><strong>{len(rows)}</strong> suggested match(es), <strong>{accepted}</strong> marked for import, <strong>{needs_review}</strong> awaiting review.</p>
   <p class="muted">Compared detected covers against {_h(summary.get('cover_index_entries', '0'))} indexed cover images.</p>
-  <p class="muted">Provider: {_h(summary.get('provider'))} | Platform hint: {_h(summary.get('platform')) or 'none'} | Threshold: {_h(summary.get('accept_threshold'))}</p>
+  <p class="muted">Provider: {_h(summary.get('provider'))} | Platform hint: {_h(summary.get('platform')) or 'none'}</p>
 </section>
 <form method="post" action="/ingest/{_h(run_id)}/review">
   {self._review_rows_table(rows)}
@@ -722,42 +1020,76 @@ class CollectionHandler(BaseHTTPRequestHandler):
     def _review_rows_table(self, rows: list[dict[str, str]]) -> str:
         if not rows:
             return '<div class="panel muted">No case candidates were detected.</div>'
-        table_rows = []
-        decision_options = ["review", "accept", "ignore"]
+        grouped_rows = {"review": [], "accept": [], "ignore": []}
         for index, row in enumerate(rows):
             crop = row.get("crop_path")
+            decision = row.get("decision") if row.get("decision") in grouped_rows else "review"
             matched_cover = _matched_cover_path(row)
             crop_html = _cover_thumb(crop, "Uploaded", "Detected crop from uploaded photo")
-            matched_cover_html = _cover_thumb(matched_cover, "Matched", "Matched cached cover art")
-            cover_pair_html = f'<div class="cover-pair">{crop_html}{matched_cover_html}</div>'
-            options = "".join(
-                f'<option value="{decision}"{_selected(row.get("decision"), decision)}>{decision}</option>'
-                for decision in decision_options
+            matched_cover_html = _cover_thumb(
+                matched_cover,
+                "Matched",
+                "Matched cached cover art",
+                row_index=index,
+                role="matched-cover-sample",
             )
+            cover_pair_html = f'<div class="cover-pair">{crop_html}{matched_cover_html}</div>'
             hidden_metadata = "".join(
                 f'<input type="hidden" name="row_{index}_{field}" value="{_h(row.get(field))}">'
-                for field in ("release_date", "developer", "publisher", "description", "cover_url", "notes")
+                for field in (
+                    "provider",
+                    "provider_game_id",
+                    "release_date",
+                    "developer",
+                    "publisher",
+                    "description",
+                    "cover_url",
+                    "confidence",
+                    "notes",
+                )
             )
-            table_rows.append(
+            action_buttons = f"""
+    <div class="decision-actions">
+      <button class="icon-button accept" type="button" data-row="{index}" data-action-decision="accept" title="Accept">&#10003;</button>
+      <button class="icon-button ignore" type="button" data-row="{index}" data-action-decision="ignore" title="Ignore">&#10005;</button>
+      <button class="icon-button review" type="button" data-row="{index}" data-action-decision="review" title="Move back to review">&#8634;</button>
+    </div>"""
+            grouped_rows[decision].append(
                 f"""
-<tr>
+<tr data-row="{index}" data-decision="{_h(decision)}">
   <td>{cover_pair_html}<input type="hidden" name="row_{index}_photo_path" value="{_h(row.get('photo_path'))}"><input type="hidden" name="row_{index}_crop_path" value="{_h(crop)}"></td>
-  <td><input name="row_{index}_candidate_title" value="{_h(row.get('candidate_title'))}"></td>
+  <td><textarea class="title-field" name="row_{index}_candidate_title" rows="2">{_h(row.get('candidate_title'))}</textarea></td>
   <td><input name="row_{index}_platform" value="{_h(row.get('platform'))}"></td>
-  <td><input name="row_{index}_provider" value="{_h(row.get('provider'))}"></td>
-  <td><input name="row_{index}_provider_game_id" value="{_h(row.get('provider_game_id'))}"></td>
-  <td><input name="row_{index}_matched_title" value="{_h(row.get('matched_title'))}"></td>
-  <td><input name="row_{index}_confidence" value="{_h(row.get('confidence'))}"></td>
-  <td><select name="row_{index}_decision">{options}</select></td>
+  <td>
+    <div class="match-control">
+      <textarea class="title-field" name="row_{index}_matched_title" rows="2" data-row="{index}" data-role="match-title-input" autocomplete="off">{_h(row.get('matched_title'))}</textarea>
+      <div class="match-suggestions" data-row="{index}" data-role="match-suggestions" hidden></div>
+    </div>
+  </td>
+  <td>{action_buttons}<input type="hidden" name="row_{index}_decision" value="{_h(decision)}"></td>
   <td>{hidden_metadata}</td>
 </tr>"""
             )
+
+        def section_table(decision: str, title: str, empty_text: str) -> str:
+            body_rows = "".join(grouped_rows[decision])
+            empty_hidden = " hidden" if grouped_rows[decision] else ""
+            return f"""
+<section class="outcome-section">
+  <h2>{_h(title)} <span class="badge" data-role="{decision}-count">{len(grouped_rows[decision])}</span></h2>
+  <div class="empty-state" data-role="{decision}-empty"{empty_hidden}>{_h(empty_text)}</div>
+  <table class="review-table">
+    <thead><tr><th>Covers</th><th>Suggested</th><th>Platform</th><th>Matched Title</th><th>Action</th><th></th></tr></thead>
+    <tbody data-role="{decision}-rows">{body_rows}</tbody>
+  </table>
+</section>"""
+
         return f"""
 <input type="hidden" name="row_count" value="{len(rows)}">
-<table class="review-table">
-  <thead><tr><th>Covers</th><th>Detected Match</th><th>Platform</th><th>Provider</th><th>Provider ID</th><th>Matched Title</th><th>Confidence</th><th>Decision</th><th></th></tr></thead>
-  <tbody>{''.join(table_rows)}</tbody>
-</table>"""
+{section_table("review", "Review Queue", "No rows waiting for review.")}
+{section_table("accept", "Accepted", "No accepted rows yet.")}
+{section_table("ignore", "Ignored", "No ignored rows yet.")}
+"""
 
     def _handle_ingest_review(self, run_id: str) -> None:
         form = self._form()

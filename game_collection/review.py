@@ -71,6 +71,8 @@ def match_to_row(row: dict[str, str], match: GameMatch | None, *, accept_thresho
     if match is None:
         updated["decision"] = "review"
         return updated
+    current_decision = row.get("decision")
+    decision = current_decision if current_decision in {"accept", "ignore"} else "review"
     updated.update(
         {
             "provider": match.provider,
@@ -82,7 +84,7 @@ def match_to_row(row: dict[str, str], match: GameMatch | None, *, accept_thresho
             "description": match.description or "",
             "cover_url": match.cover_url or "",
             "confidence": f"{match.confidence:.2f}",
-            "decision": "accept" if match.confidence >= accept_threshold else "review",
+            "decision": decision,
             "notes": json.dumps(match.raw or {}, ensure_ascii=True)[:1000],
         }
     )

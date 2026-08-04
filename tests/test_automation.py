@@ -27,7 +27,7 @@ class FakeProvider:
 
 
 class AutoIngestTests(unittest.TestCase):
-    def test_auto_import_only_accepts_high_confidence_rows(self) -> None:
+    def test_auto_import_does_not_accept_by_confidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             review = root / "review.csv"
@@ -54,14 +54,14 @@ class AutoIngestTests(unittest.TestCase):
                 played="unplayed",
             )
 
-            self.assertEqual(result.imported, 1)
-            self.assertEqual(result.needs_review, 1)
+            self.assertEqual(result.imported, 0)
+            self.assertEqual(result.needs_review, 2)
             self.assertTrue(audit.exists())
             with db.connect(db_path) as conn:
                 rows = list(db.list_collection(conn))
-            self.assertEqual([row["title"] for row in rows], ["Metroid Prime"])
+            self.assertEqual(rows, [])
 
-    def test_auto_import_skips_existing_games_by_default(self) -> None:
+    def test_auto_import_preserves_manual_accepts_and_skips_existing_games_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             review = root / "review.csv"
@@ -71,7 +71,7 @@ class AutoIngestTests(unittest.TestCase):
                 "\n".join(
                     [
                         "photo_path,crop_path,candidate_title,platform,provider,provider_game_id,matched_title,confidence,decision,notes",
-                        "photo.jpg,,Metroid Prime,Nintendo GameCube,,,,,,",
+                        "photo.jpg,,Metroid Prime,Nintendo GameCube,,,,,accept,",
                     ]
                 ),
                 encoding="utf-8",
@@ -96,4 +96,3 @@ class AutoIngestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

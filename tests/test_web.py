@@ -117,9 +117,52 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn("Matched", body)
         self.assertIn("review/cover-indexes/igdb/gamecube/covers/123.jpg", body)
         self.assertNotIn("<th>Notes</th>", body)
+        self.assertNotIn("<th>Provider</th>", body)
+        self.assertNotIn("<th>Provider ID</th>", body)
+        self.assertNotIn("<th>Conf.</th>", body)
+        self.assertNotIn("<select name=\"row_0_decision\"", body)
+        self.assertIn('data-role="match-title-input"', body)
+        self.assertIn('<textarea class="title-field" name="row_0_candidate_title"', body)
+        self.assertIn('<textarea class="title-field" name="row_0_matched_title"', body)
         self.assertIn('type="hidden" name="row_0_notes"', body)
+        self.assertIn('type="hidden" name="row_0_provider"', body)
+        self.assertIn('type="hidden" name="row_0_confidence"', body)
+        self.assertIn('data-action-decision="accept"', body)
+        self.assertIn('data-action-decision="ignore"', body)
+        self.assertIn("Review Queue", body)
+        self.assertIn("Accepted", body)
+        self.assertIn("Ignored", body)
 
-    def test_upload_ingest_imports_high_confidence_match(self) -> None:
+    def test_match_search_returns_cached_cover_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            index_path = root / "review" / "cover-indexes" / "igdb" / "nintendo-gamecube" / "index.csv"
+            covers_dir = index_path.parent / "covers"
+            covers_dir.mkdir(parents=True)
+            (covers_dir / "123.jpg").write_bytes(b"fake")
+            index_path.write_text(
+                "provider,provider_game_id,title,platform,release_date,developer,publisher,description,cover_url,cover_path,phash\n"
+                f"igdb,123,Metroid Prime,Nintendo GameCube,2002-11-17,Retro Studios,Nintendo,,https://example.test/cover.jpg,{covers_dir / '123.jpg'},abc\n",
+                encoding="utf-8",
+            )
+            db_path = root / "collection.sqlite3"
+            handler = type("TestCollectionHandler", (CollectionHandler,), {"db_path": db_path})
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+
+            url = f"http://127.0.0.1:{server.server_port}/matches?platform=Nintendo%20GameCube&q=metro"
+            with patch("game_collection.web.default_index_path", return_value=index_path):
+                with urllib.request.urlopen(url, timeout=10) as response:
+                    payload = response.read().decode("utf-8")
+
+            self.assertIn('"title": "Metroid Prime"', payload)
+            self.assertIn('"provider_game_id": "123"', payload)
+            self.assertIn('"cover_path":', payload)
+
+    def test_upload_ingest_creates_manual_review_suggestions_without_importing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             db_path = root / "collection.sqlite3"
@@ -187,9 +230,10 @@ class WebIngestTests(unittest.TestCase):
                     html = response.read().decode("utf-8")
 
             self.assertIn("Ingest Results", html)
+            self.assertIn("suggested match", html)
             with db.connect(db_path) as conn:
                 rows = list(db.list_collection(conn))
-            self.assertEqual([row["title"] for row in rows], ["Metroid Prime"])
+            self.assertEqual(rows, [])
 
     def test_upload_ingest_handles_multiple_images_in_one_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -263,11 +307,11 @@ class WebIngestTests(unittest.TestCase):
                 with urllib.request.urlopen(request, timeout=10) as response:
                     html = response.read().decode("utf-8")
 
-            self.assertIn("<strong>3</strong> imported", html)
+            self.assertIn("<strong>3</strong> suggested match", html)
             self.assertEqual(detect.call_count, 3)
             with db.connect(db_path) as conn:
                 titles = [row["title"] for row in db.list_collection(conn)]
-            self.assertEqual(titles, ["F-Zero GX", "Metroid Prime", "Pikmin 2"])
+            self.assertEqual(titles, [])
 
 
 if __name__ == "__main__":

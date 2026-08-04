@@ -129,7 +129,6 @@ Set:
 
 - metadata provider, usually `igdb`,
 - platform from the cached IGDB cover-index picklist,
-- auto-import threshold, default `0.92`,
 - ownership status,
 - initial play status.
 
@@ -163,11 +162,11 @@ The web UI handles the choreography:
 - stores uploaded photos in an ignored local run folder,
 - crops detected game cases,
 - compares each crop against an already-cached IGDB cover-art index,
-- imports the best cover-art matches when confidence is high,
-- imports rows with confidence at or above the threshold,
-- shows lower-confidence rows on the results page for correction.
+- shows suggested matches as side-by-side uploaded crop and cached cover images,
+- lets you correct the matched title from cached platform metadata,
+- imports only rows you manually accept.
 
-The default threshold is intentionally conservative. Lower it only if the audit CSV looks consistently correct for your photos.
+The image matcher is treated as a suggestion engine. The browser review page is the source of truth for deciding what gets imported.
 
 ### Backend validation with local sample photos
 
@@ -197,32 +196,30 @@ The command runs the backend ingestion path without the web UI, using local cove
 
 Those files are ignored because they can reveal your real library. Commit only generic examples such as `examples/sample-expectations.example.json`.
 
-### 4. Verify automated results
+### 4. Review suggested matches
 
 After upload, the browser redirects to an ingest results page.
 
 Check:
 
-- imported count,
-- skipped-existing count,
-- rows that need review,
+- suggested match count,
 - detected crop thumbnails,
+- matched cover thumbnails,
 - matched title,
-- provider ID,
-- confidence.
+- platform.
 
-Rows marked `accept` were imported automatically. Rows marked `review` were not imported yet.
+No rows are imported automatically from photo upload.
 
-### 5. Fix uncertain leftovers in the browser
+### 5. Accept or ignore rows in the browser
 
-For a low-confidence row, edit the fields directly on the results page:
+For each suggested row:
 
 - fix `candidate_title`,
 - confirm `platform`,
-- set or fix `provider`,
-- set or fix `provider_game_id`,
-- fix `matched_title`,
-- change `decision` to `accept`.
+- type in `matched_title` to search cached platform metadata,
+- choose the correct title to refresh the matched cover image,
+- click the accept icon to move it to the `Accepted` table,
+- click the ignore icon to move it to the `Ignored` table.
 
 Click `Save And Import Accepted Rows`.
 
@@ -267,7 +264,7 @@ Or use TheGamesDB:
 game-collection match-review review/2026-08-03-gamecube-floor.csv --provider thegamesdb --out review/2026-08-03-gamecube-floor.matched.csv
 ```
 
-The matcher writes `decision=accept` for high-confidence matches and `decision=review` for uncertain ones.
+The matcher writes suggested metadata for review. Importing still depends on manually setting `decision=accept`.
 
 ### 3. Verify the matched CSV
 
@@ -391,5 +388,5 @@ The current recognition implementation is intentionally conservative:
 - it detects rectangular case regions,
 - crops each case,
 - compares each crop to indexed provider cover art using perceptual image hashes,
-- imports only high-confidence matches,
-- asks for review only when confidence is low.
+- presents image-match suggestions,
+- imports only manually accepted rows.

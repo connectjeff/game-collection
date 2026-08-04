@@ -336,7 +336,7 @@ def build_parser() -> argparse.ArgumentParser:
     import_review.add_argument("--played", default="unplayed", choices=["unplayed", "playing", "completed", "retired"])
     import_review.set_defaults(func=cmd_import_review)
 
-    auto_import = subparsers.add_parser("auto-import-review", help="Match and import high-confidence rows from a review CSV")
+    auto_import = subparsers.add_parser("auto-import-review", help="Match review rows and import only rows already marked accept")
     _add_db_arg(auto_import)
     auto_import.add_argument("review_csv", type=Path)
     auto_import.add_argument("--provider", default="igdb", choices=PROVIDER_CHOICES)
