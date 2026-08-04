@@ -132,6 +132,8 @@ Set:
 - ownership status,
 - initial play status.
 
+The selected platform is also used as a detector hint. For PS5, PS4, Xbox One, and Xbox Series X|S, the importer looks for Blu-ray-style case proportions and filters out rectangles that are too large, too small, or too far from the expected case shape.
+
 Then click `Upload And Ingest`.
 
 Prioritized platform presets:

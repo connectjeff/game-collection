@@ -96,23 +96,28 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn("12 covers", body)
 
     def test_review_table_compares_uploaded_crop_to_matched_cover(self) -> None:
-        body = CollectionHandler._review_rows_table(
-            CollectionHandler,
-            [
-                {
-                    "photo_path": "review/web-ingests/run/uploads/upload-001.jpg",
-                    "crop_path": "review/web-ingests/run/crops/upload-001-001.jpg",
-                    "candidate_title": "Metroid Prime",
-                    "platform": "Nintendo GameCube",
-                    "provider": "igdb",
-                    "provider_game_id": "123",
-                    "matched_title": "Metroid Prime",
-                    "confidence": "0.98",
-                    "decision": "review",
-                    "notes": "cover_match_distance=1; cover_path=review/cover-indexes/igdb/gamecube/covers/123.jpg",
-                }
-            ],
-        )
+        with patch("game_collection.web.platform_cache_statuses") as statuses:
+            statuses.return_value = [
+                type("Status", (), {"name": "Nintendo GameCube", "cached": True, "count": 12})(),
+                type("Status", (), {"name": "PlayStation 5", "cached": True, "count": 9})(),
+            ]
+            body = CollectionHandler._review_rows_table(
+                CollectionHandler,
+                [
+                    {
+                        "photo_path": "review/web-ingests/run/uploads/upload-001.jpg",
+                        "crop_path": "review/web-ingests/run/crops/upload-001-001.jpg",
+                        "candidate_title": "Metroid Prime",
+                        "platform": "Nintendo GameCube",
+                        "provider": "igdb",
+                        "provider_game_id": "123",
+                        "matched_title": "Metroid Prime",
+                        "confidence": "0.98",
+                        "decision": "review",
+                        "notes": "cover_match_distance=1; cover_path=review/cover-indexes/igdb/gamecube/covers/123.jpg",
+                    }
+                ],
+            )
 
         self.assertIn("Uploaded", body)
         self.assertIn("Matched", body)
@@ -129,6 +134,9 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn('type="hidden" name="row_0_notes"', body)
         self.assertIn('type="hidden" name="row_0_provider"', body)
         self.assertIn('type="hidden" name="row_0_confidence"', body)
+        self.assertIn('select name="row_0_platform"', body)
+        self.assertIn('value="Nintendo GameCube" selected', body)
+        self.assertIn('value="PlayStation 5"', body)
         self.assertIn('data-modal-image="/media?path=review/web-ingests/run/crops/upload-001-001.jpg"', body)
         self.assertIn('data-action-decision="accept"', body)
         self.assertIn('data-action-decision="ignore"', body)
@@ -137,6 +145,26 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn("Review Queue", body)
         self.assertIn("Accepted", body)
         self.assertIn("Ignored", body)
+
+    def test_review_platform_selector_preserves_uncached_current_platform(self) -> None:
+        with patch("game_collection.web.platform_cache_statuses") as statuses:
+            statuses.return_value = [
+                type("Status", (), {"name": "PlayStation 5", "cached": True, "count": 9})(),
+            ]
+            body = CollectionHandler._review_rows_table(
+                CollectionHandler,
+                [
+                    {
+                        "platform": "Nintendo GameCube",
+                        "matched_title": "Metroid Prime",
+                        "decision": "review",
+                    }
+                ],
+            )
+
+        self.assertIn('select name="row_0_platform"', body)
+        self.assertIn('value="Nintendo GameCube" selected', body)
+        self.assertIn('value="PlayStation 5"', body)
 
     def test_review_outcome_rows_have_section_specific_actions(self) -> None:
         body = CollectionHandler._review_rows_table(

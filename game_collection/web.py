@@ -538,6 +538,7 @@ def _layout(title: str, body: str) -> bytes:
       setField(row, "provider", match.provider);
       setField(row, "provider_game_id", match.provider_game_id);
       setField(row, "matched_title", match.title);
+      setField(row, "platform", match.platform);
       setField(row, "release_date", match.release_date);
       setField(row, "developer", match.developer);
       setField(row, "publisher", match.publisher);
@@ -650,6 +651,25 @@ def _layout(title: str, body: str) -> bytes:
       }});
     }}
 
+    function installPlatformSelectors() {{
+      document.querySelectorAll("[data-role='row-platform-select']").forEach((select) => {{
+        select.addEventListener("change", () => {{
+          const row = select.dataset.row;
+          setField(row, "provider_game_id", "");
+          setField(row, "release_date", "");
+          setField(row, "developer", "");
+          setField(row, "publisher", "");
+          setField(row, "description", "");
+          setField(row, "cover_url", "");
+          setField(row, "confidence", "");
+          setField(row, "notes", "");
+          setMatchedCover(row, "");
+          const input = document.querySelector(`[data-row="${{row}}"][data-role="match-title-input"]`);
+          if (input) loadMatches(input);
+        }});
+      }});
+    }}
+
     function installDecisionActions() {{
       document.addEventListener("click", (event) => {{
         const button = event.target.closest("[data-action-decision]");
@@ -684,6 +704,7 @@ def _layout(title: str, body: str) -> bytes:
 
     document.addEventListener("DOMContentLoaded", () => {{
       installMatchInputs();
+      installPlatformSelectors();
       installDecisionActions();
       installImageModal();
     }});
@@ -1163,6 +1184,27 @@ class CollectionHandler(BaseHTTPRequestHandler):
         if not rows:
             return '<div class="panel muted">No case candidates were detected.</div>'
         grouped_rows = {"review": [], "accept": [], "ignore": []}
+        cached_platforms = _cached_platform_options(self.platform_options)
+
+        def platform_select(index: int, current_platform: str | None) -> str:
+            current = current_platform or ""
+            options = list(cached_platforms)
+            if current and current not in options:
+                options.insert(0, current)
+            if not options:
+                return (
+                    f'<input name="row_{index}_platform" value="{_h(current)}" '
+                    f'data-row="{index}" data-role="row-platform-select">'
+                )
+            option_html = "".join(
+                f'<option value="{_h(platform)}"{" selected" if platform == current else ""}>{_h(platform)}</option>'
+                for platform in options
+            )
+            return (
+                f'<select name="row_{index}_platform" data-row="{index}" '
+                f'data-role="row-platform-select">{option_html}</select>'
+            )
+
         for index, row in enumerate(rows):
             crop = row.get("crop_path")
             decision = row.get("decision") if row.get("decision") in grouped_rows else "review"
@@ -1213,7 +1255,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 f"""
 <tr data-row="{index}" data-decision="{_h(decision)}">
   <td>{cover_pair_html}<input type="hidden" name="row_{index}_photo_path" value="{_h(row.get('photo_path'))}"><input type="hidden" name="row_{index}_crop_path" value="{_h(crop)}"></td>
-  <td><input name="row_{index}_platform" value="{_h(row.get('platform'))}"></td>
+  <td>{platform_select(index, row.get('platform'))}</td>
   <td>
     <div class="match-control">
       <textarea class="title-field" name="row_{index}_matched_title" rows="2" data-row="{index}" data-role="match-title-input" autocomplete="off">{_h(row.get('matched_title'))}</textarea>
