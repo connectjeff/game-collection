@@ -109,6 +109,7 @@ class WebIngestTests(unittest.TestCase):
                         "crop_path": "review/web-ingests/run/crops/upload-001-001.jpg",
                         "candidate_title": "Metroid Prime",
                         "platform": "Nintendo GameCube",
+                        "play_status": "completed",
                         "provider": "igdb",
                         "provider_game_id": "123",
                         "matched_title": "Metroid Prime",
@@ -137,6 +138,9 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn('select name="row_0_platform"', body)
         self.assertIn('value="Nintendo GameCube" selected', body)
         self.assertIn('value="PlayStation 5"', body)
+        self.assertIn("<th>Play Status</th>", body)
+        self.assertIn('select name="row_0_play_status"', body)
+        self.assertIn('value="completed" selected', body)
         self.assertIn('data-modal-image="/media?path=review/web-ingests/run/crops/upload-001-001.jpg"', body)
         self.assertIn('data-action-decision="accept"', body)
         self.assertIn('data-action-decision="ignore"', body)

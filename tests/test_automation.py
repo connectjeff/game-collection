@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from game_collection import db
-from game_collection.automation import auto_import_review
+from game_collection.automation import auto_import_review, import_accepted_rows
 from game_collection.providers import GameMatch
 
 
@@ -92,6 +92,35 @@ class AutoIngestTests(unittest.TestCase):
             self.assertEqual(first.imported, 1)
             self.assertEqual(second.imported, 0)
             self.assertEqual(second.skipped_existing, 1)
+
+    def test_import_accepted_rows_uses_row_play_status_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "collection.sqlite3"
+            rows = [
+                {
+                    "candidate_title": "Metroid Prime",
+                    "platform": "Nintendo GameCube",
+                    "play_status": "completed",
+                    "provider": "fake",
+                    "provider_game_id": "metroid-prime",
+                    "matched_title": "Metroid Prime",
+                    "decision": "accept",
+                }
+            ]
+
+            imported, skipped = import_accepted_rows(
+                db_path=db_path,
+                rows=rows,
+                status="owned",
+                played="unplayed",
+                skip_existing=True,
+            )
+
+            self.assertEqual(imported, 1)
+            self.assertEqual(skipped, 0)
+            with db.connect(db_path) as conn:
+                collection_rows = list(db.list_collection(conn))
+            self.assertEqual(collection_rows[0]["latest_play_status"], "completed")
 
 
 if __name__ == "__main__":

@@ -158,6 +158,7 @@ def detect_photo_candidates(
             "crop_path": str(crop_path),
             "candidate_title": "",
             "platform": platform or "",
+            "play_status": "",
             "provider": "",
             "provider_game_id": "",
             "matched_title": "",

@@ -89,7 +89,7 @@ def import_accepted_rows(
                 skipped_existing += 1
                 continue
             db.add_collection_item(conn, game_id=game_id, acquisition_status=status)
-            db.add_playthrough(conn, game_id=game_id, play_status=played)
+            db.add_playthrough(conn, game_id=game_id, play_status=row.get("play_status") or played)
             imported += 1
         conn.commit()
     finally:

@@ -360,9 +360,10 @@ def _layout(title: str, body: str) -> bytes:
     }}
     .review-table th:nth-child(1), .review-table td:nth-child(1) {{ width: 210px; }}
     .review-table th:nth-child(2), .review-table td:nth-child(2) {{ width: 18%; }}
-    .review-table th:nth-child(3), .review-table td:nth-child(3) {{ width: auto; }}
-    .review-table th:nth-child(4), .review-table td:nth-child(4) {{ width: 120px; }}
-    .review-table th:nth-child(5), .review-table td:nth-child(5) {{ width: 1px; padding-left: 0; padding-right: 0; }}
+    .review-table th:nth-child(3), .review-table td:nth-child(3) {{ width: 130px; }}
+    .review-table th:nth-child(4), .review-table td:nth-child(4) {{ width: auto; }}
+    .review-table th:nth-child(5), .review-table td:nth-child(5) {{ width: 120px; }}
+    .review-table th:nth-child(6), .review-table td:nth-child(6) {{ width: 1px; padding-left: 0; padding-right: 0; }}
     .decision-actions {{
       display: flex;
       gap: 6px;
@@ -1125,6 +1126,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 )
             for row in rows:
                 row["decision"] = "review"
+                row["play_status"] = played
 
             write_review(self._audit_path(run_id), rows)
 
@@ -1205,6 +1207,14 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 f'data-role="row-platform-select">{option_html}</select>'
             )
 
+        def play_status_select(index: int, current_status: str | None) -> str:
+            current = current_status if current_status in PLAY_STATUSES else "unplayed"
+            options = "".join(
+                f'<option value="{_h(status)}"{" selected" if status == current else ""}>{_h(status)}</option>'
+                for status in PLAY_STATUSES
+            )
+            return f'<select name="row_{index}_play_status">{options}</select>'
+
         for index, row in enumerate(rows):
             crop = row.get("crop_path")
             decision = row.get("decision") if row.get("decision") in grouped_rows else "review"
@@ -1256,6 +1266,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
 <tr data-row="{index}" data-decision="{_h(decision)}">
   <td>{cover_pair_html}<input type="hidden" name="row_{index}_photo_path" value="{_h(row.get('photo_path'))}"><input type="hidden" name="row_{index}_crop_path" value="{_h(crop)}"></td>
   <td>{platform_select(index, row.get('platform'))}</td>
+  <td>{play_status_select(index, row.get('play_status'))}</td>
   <td>
     <div class="match-control">
       <textarea class="title-field" name="row_{index}_matched_title" rows="2" data-row="{index}" data-role="match-title-input" autocomplete="off">{_h(row.get('matched_title'))}</textarea>
@@ -1275,7 +1286,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
   <h2>{_h(title)} <span class="badge" data-role="{decision}-count">{len(grouped_rows[decision])}</span></h2>
   <div class="empty-state" data-role="{decision}-empty"{empty_hidden}>{_h(empty_text)}</div>
   <table class="review-table">
-    <thead><tr><th>Covers</th><th>Platform</th><th>Matched Title</th><th>Action</th><th></th></tr></thead>
+    <thead><tr><th>Covers</th><th>Platform</th><th>Play Status</th><th>Matched Title</th><th>Action</th><th></th></tr></thead>
     <tbody data-role="{decision}-rows">{body_rows}</tbody>
   </table>
 </section>"""
