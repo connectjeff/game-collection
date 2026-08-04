@@ -280,10 +280,7 @@ class IgdbProvider:
             platform_ids = self.platform_ids(platform, limit=10)
             if not platform_ids:
                 raise ProviderError(f"Could not find IGDB platform: {platform}")
-            if len(platform_ids) == 1:
-                where_parts.append(f"platforms = {platform_ids[0]}")
-            else:
-                where_parts.append(f"platforms = ({','.join(str(item) for item in platform_ids)})")
+            where_parts.append(f"platforms = ({','.join(str(item) for item in platform_ids)})")
 
         matches: list[GameMatch] = []
         seen_game_ids: set[str] = set()

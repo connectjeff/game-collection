@@ -4,11 +4,13 @@ import email.policy
 import json
 import mimetypes
 import html
+import re
 import sqlite3
 import threading
 import uuid
 import urllib.parse
 from email.parser import BytesParser
+from functools import lru_cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,6 +19,7 @@ from typing import Any
 from . import db
 from .automation import import_accepted_rows
 from .cover_match import (
+    CoverIndexEntry,
     PRIORITIZED_PLATFORMS,
     build_cover_index,
     build_platform_cache,
@@ -35,6 +38,7 @@ PLAY_STATUSES = ["unplayed", "playing", "completed", "retired"]
 PROVIDER_CHOICES = ["igdb"]
 PLATFORM_PRESETS = PRIORITIZED_PLATFORMS
 WEB_INGEST_ROOT = Path("review/web-ingests")
+AUTOCOMPLETE_LIMIT = 25
 
 
 def _h(value: Any) -> str:
@@ -51,6 +55,70 @@ def _cached_platform_options(platforms: list[str]) -> list[str]:
 
 def _normalize_title(value: str) -> str:
     return "".join(char.casefold() for char in value if char.isalnum())
+
+
+def _title_tokens(value: str) -> list[str]:
+    return [token.casefold() for token in re.findall(r"[a-zA-Z0-9]+", value)]
+
+
+def _title_initials(value: str) -> str:
+    return "".join(token[0] for token in _title_tokens(value) if token)
+
+
+@lru_cache(maxsize=128)
+def _read_cover_index_cached(index_path: str, mtime_ns: int) -> tuple[CoverIndexEntry, ...]:
+    return tuple(read_cover_index(Path(index_path)))
+
+
+def _cached_cover_entries(provider: str, platform: str) -> list[CoverIndexEntry]:
+    index_path = default_index_path(provider, platform)
+    if not index_path.exists():
+        return []
+    return list(_read_cover_index_cached(str(index_path), index_path.stat().st_mtime_ns))
+
+
+def _title_match_score(query: str, title: str) -> tuple[int, str]:
+    normalized_query = _normalize_title(query)
+    normalized_title = _normalize_title(title)
+    if not normalized_query or not normalized_title:
+        return (0, title.casefold())
+
+    query_tokens = _title_tokens(query)
+    title_tokens = _title_tokens(title)
+    title_initials = _title_initials(title)
+
+    score = 0
+    if normalized_title == normalized_query:
+        score += 1000
+    if normalized_title.startswith(normalized_query):
+        score += 800
+    if normalized_query in normalized_title:
+        score += 500
+    if query_tokens and all(any(token in title_token for title_token in title_tokens) for token in query_tokens):
+        score += 400 + (25 * len(query_tokens))
+    if query_tokens and all(any(title_token.startswith(token) for title_token in title_tokens) for token in query_tokens):
+        score += 250
+    if title_initials.startswith(normalized_query):
+        score += 220
+    if normalized_query in title_initials:
+        score += 140
+
+    return (score, title.casefold())
+
+
+def _autocomplete_matches(*, provider: str, platform: str, query: str, limit: int = AUTOCOMPLETE_LIMIT) -> list[CoverIndexEntry]:
+    scored: list[tuple[int, str, CoverIndexEntry]] = []
+    seen_ids: set[str] = set()
+    for entry in _cached_cover_entries(provider, platform):
+        if entry.provider_game_id in seen_ids:
+            continue
+        seen_ids.add(entry.provider_game_id)
+        score, sort_title = _title_match_score(query, entry.title)
+        if score <= 0:
+            continue
+        scored.append((score, sort_title, entry))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [entry for _, _, entry in scored[:limit]]
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
@@ -492,12 +560,37 @@ def _layout(title: str, body: str) -> bytes:
       }});
     }}
 
+    function actionButtonsFor(decision, row) {{
+      if (decision === "review") {{
+        return `
+          <button class="icon-button accept" type="button" data-row="${{row}}" data-action-decision="accept" title="Accept">&#10003;</button>
+          <button class="icon-button ignore" type="button" data-row="${{row}}" data-action-decision="ignore" title="Ignore">&#10005;</button>
+        `;
+      }}
+      if (decision === "accept") {{
+        return `
+          <button class="icon-button review" type="button" data-row="${{row}}" data-action-decision="review" title="Move to review">&#8634;</button>
+          <button class="icon-button ignore" type="button" data-row="${{row}}" data-action-decision="ignore" title="Ignore">&#10005;</button>
+        `;
+      }}
+      return `
+        <button class="icon-button review" type="button" data-row="${{row}}" data-action-decision="review" title="Move to review">&#8634;</button>
+        <button class="icon-button accept" type="button" data-row="${{row}}" data-action-decision="accept" title="Accept">&#10003;</button>
+      `;
+    }}
+
+    function updateDecisionActions(row, decision) {{
+      const actionContainer = document.querySelector(`[data-row="${{row}}"][data-role="decision-actions"]`);
+      if (actionContainer) actionContainer.innerHTML = actionButtonsFor(decision, row);
+    }}
+
     function moveReviewRow(row, decision) {{
       const tableRow = document.querySelector(`tr[data-row="${{row}}"]`);
       const target = document.querySelector(`[data-role="${{decision}}-rows"]`);
       if (!tableRow || !target) return;
       setField(row, "decision", decision);
       tableRow.dataset.decision = decision;
+      updateDecisionActions(row, decision);
       target.appendChild(tableRow);
       updateOutcomeCounts();
     }}
@@ -558,10 +651,10 @@ def _layout(title: str, body: str) -> bytes:
     }}
 
     function installDecisionActions() {{
-      document.querySelectorAll("[data-action-decision]").forEach((button) => {{
-        button.addEventListener("click", () => {{
-          moveReviewRow(button.dataset.row, button.dataset.actionDecision);
-        }});
+      document.addEventListener("click", (event) => {{
+        const button = event.target.closest("[data-action-decision]");
+        if (!button) return;
+        moveReviewRow(button.dataset.row, button.dataset.actionDecision);
       }});
       updateOutcomeCounts();
     }}
@@ -789,13 +882,8 @@ class CollectionHandler(BaseHTTPRequestHandler):
         if len(q) < 2 or not platform:
             self._send_json([])
             return
-        entries = read_cover_index(default_index_path("igdb", platform))
-        normalized_query = _normalize_title(q)
         matches = []
-        for entry in entries:
-            normalized_title = _normalize_title(entry.title)
-            if normalized_query not in normalized_title:
-                continue
+        for entry in _autocomplete_matches(provider="igdb", platform=platform, query=q):
             matches.append(
                 {
                     "provider": entry.provider,
@@ -812,8 +900,6 @@ class CollectionHandler(BaseHTTPRequestHandler):
                     "notes": json.dumps({"manual_match": True, "cover_index_path": str(entry.cover_path)}, ensure_ascii=True),
                 }
             )
-            if len(matches) >= 8:
-                break
         self._send_json(matches)
 
     def _collection(self, query: str) -> str:
@@ -1107,19 +1193,19 @@ class CollectionHandler(BaseHTTPRequestHandler):
             )
             if decision == "review":
                 action_buttons = f"""
-    <div class="decision-actions">
+    <div class="decision-actions" data-row="{index}" data-role="decision-actions">
       <button class="icon-button accept" type="button" data-row="{index}" data-action-decision="accept" title="Accept">&#10003;</button>
       <button class="icon-button ignore" type="button" data-row="{index}" data-action-decision="ignore" title="Ignore">&#10005;</button>
     </div>"""
             elif decision == "accept":
                 action_buttons = f"""
-    <div class="decision-actions">
+    <div class="decision-actions" data-row="{index}" data-role="decision-actions">
       <button class="icon-button review" type="button" data-row="{index}" data-action-decision="review" title="Move to review">&#8634;</button>
       <button class="icon-button ignore" type="button" data-row="{index}" data-action-decision="ignore" title="Ignore">&#10005;</button>
     </div>"""
             else:
                 action_buttons = f"""
-    <div class="decision-actions">
+    <div class="decision-actions" data-row="{index}" data-role="decision-actions">
       <button class="icon-button review" type="button" data-row="{index}" data-action-decision="review" title="Move to review">&#8634;</button>
       <button class="icon-button accept" type="button" data-row="{index}" data-action-decision="accept" title="Accept">&#10003;</button>
     </div>"""

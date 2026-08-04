@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import threading
 import unittest
@@ -131,6 +132,7 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn('data-modal-image="/media?path=review/web-ingests/run/crops/upload-001-001.jpg"', body)
         self.assertIn('data-action-decision="accept"', body)
         self.assertIn('data-action-decision="ignore"', body)
+        self.assertIn('data-role="decision-actions"', body)
         self.assertNotIn('data-action-decision="review"', body)
         self.assertIn("Review Queue", body)
         self.assertIn("Accepted", body)
@@ -179,9 +181,15 @@ class WebIngestTests(unittest.TestCase):
             covers_dir = index_path.parent / "covers"
             covers_dir.mkdir(parents=True)
             (covers_dir / "123.jpg").write_bytes(b"fake")
+            (covers_dir / "456.jpg").write_bytes(b"fake")
             index_path.write_text(
-                "provider,provider_game_id,title,platform,release_date,developer,publisher,description,cover_url,cover_path,phash\n"
-                f"igdb,123,Metroid Prime,Nintendo GameCube,2002-11-17,Retro Studios,Nintendo,,https://example.test/cover.jpg,{covers_dir / '123.jpg'},abc\n",
+                "\n".join(
+                    [
+                        "provider,provider_game_id,title,platform,release_date,developer,publisher,description,cover_url,cover_path,phash",
+                        f"igdb,123,Metroid Prime,Nintendo GameCube,2002-11-17,Retro Studios,Nintendo,,https://example.test/cover.jpg,{covers_dir / '123.jpg'},abc",
+                        f"igdb,456,Final Fantasy VII Remake,Nintendo GameCube,2020-04-10,Square Enix,Square Enix,,https://example.test/ff7.jpg,{covers_dir / '456.jpg'},def",
+                    ]
+                ),
                 encoding="utf-8",
             )
             db_path = root / "collection.sqlite3"
@@ -200,6 +208,14 @@ class WebIngestTests(unittest.TestCase):
             self.assertIn('"title": "Metroid Prime"', payload)
             self.assertIn('"provider_game_id": "123"', payload)
             self.assertIn('"cover_path":', payload)
+
+            url = f"http://127.0.0.1:{server.server_port}/matches?platform=Nintendo%20GameCube&q=final%20remake"
+            with patch("game_collection.web.default_index_path", return_value=index_path):
+                with urllib.request.urlopen(url, timeout=10) as response:
+                    matches = json.loads(response.read().decode("utf-8"))
+
+            self.assertEqual(matches[0]["title"], "Final Fantasy VII Remake")
+            self.assertEqual(matches[0]["provider_game_id"], "456")
 
     def test_upload_ingest_creates_manual_review_suggestions_without_importing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
