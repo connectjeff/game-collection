@@ -254,6 +254,26 @@ class IgdbProvider:
         candidates = exact or payload
         return [int(item["id"]) for item in candidates if item.get("id") is not None]
 
+    def platforms(self, limit: int = 500) -> list[dict[str, Any]]:
+        platforms: list[dict[str, Any]] = []
+        page_size = 500
+        offset = 0
+        while len(platforms) < limit:
+            batch_limit = min(page_size, limit - len(platforms))
+            payload = self._request(
+                "platforms",
+                f"fields id,name; sort name asc; limit {batch_limit}; offset {offset};",
+            )
+            if not isinstance(payload, list):
+                raise ProviderError("IGDB platforms response was not a list.")
+            if not payload:
+                break
+            platforms.extend(payload)
+            if len(payload) < batch_limit:
+                break
+            offset += batch_limit
+        return platforms
+
     def cover_index(self, *, platform: str | None = None, limit: int = 1000) -> list[GameMatch]:
         where_parts = ["cover != null", "version_parent = null"]
         if platform:

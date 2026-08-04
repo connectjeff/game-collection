@@ -11,7 +11,7 @@ from unittest.mock import patch
 from game_collection import db
 from game_collection.cover_match import CoverIndexEntry
 from game_collection.providers import GameMatch
-from game_collection.web import CollectionHandler
+from game_collection.web import CollectionHandler, PLATFORM_PRESETS
 
 
 class FakeProvider:
@@ -64,6 +64,30 @@ def multipart_body(filenames: list[str] | None = None) -> tuple[bytes, str]:
 
 
 class WebIngestTests(unittest.TestCase):
+    def test_upload_form_includes_prioritized_platform_presets(self) -> None:
+        body = CollectionHandler._ingest_form(CollectionHandler)
+
+        for platform in PLATFORM_PRESETS:
+            self.assertIn(f'<option value="{platform}">{platform}</option>', body)
+
+    def test_cache_settings_page_lists_platform_checkboxes(self) -> None:
+        handler = type(
+            "TestCollectionHandler",
+            (CollectionHandler,),
+            {"platform_options": ["PlayStation 5", "PlayStation 4"]},
+        )
+
+        with patch("game_collection.web.platform_cache_statuses") as statuses:
+            statuses.return_value = [
+                type("Status", (), {"name": "PlayStation 5", "cached": True, "count": 12})(),
+                type("Status", (), {"name": "PlayStation 4", "cached": False, "count": 0})(),
+            ]
+            body = handler._cache_settings(handler)
+
+        self.assertIn('name="platform" value="PlayStation 5" checked', body)
+        self.assertIn('name="platform" value="PlayStation 4"', body)
+        self.assertIn("12 covers", body)
+
     def test_upload_ingest_imports_high_confidence_match(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

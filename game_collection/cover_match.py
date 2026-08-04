@@ -25,6 +25,10 @@ INDEX_FIELDS = [
     "phash",
 ]
 
+PRIORITIZED_PLATFORMS = ["PlayStation 5", "PlayStation 4", "Xbox One", "Xbox Series X|S"]
+PLATFORM_CACHE_PATH = Path("review/platforms/igdb-platforms.csv")
+PLATFORM_FIELDS = ["id", "name"]
+
 
 @dataclass(frozen=True)
 class CoverIndexEntry:
@@ -46,6 +50,13 @@ class CoverMatch:
     entry: CoverIndexEntry
     distance: int
     confidence: float
+
+
+@dataclass(frozen=True)
+class PlatformCacheStatus:
+    name: str
+    cached: bool
+    count: int
 
 
 def slugify(value: str | None) -> str:
@@ -140,6 +151,80 @@ def default_index_path(provider: str, platform: str | None) -> Path:
     return Path("review/cover-indexes") / provider / slugify(platform) / "index.csv"
 
 
+def read_platform_cache(path: Path = PLATFORM_CACHE_PATH) -> list[str]:
+    if not path.exists():
+        return PRIORITIZED_PLATFORMS
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        rows = csv.DictReader(handle)
+        names = [row["name"] for row in rows if row.get("name")]
+    return prioritize_platforms(names)
+
+
+def write_platform_cache(platforms: list[dict[str, object]], path: Path = PLATFORM_CACHE_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=PLATFORM_FIELDS)
+        writer.writeheader()
+        for platform in platforms:
+            if platform.get("id") is None or not platform.get("name"):
+                continue
+            writer.writerow({"id": platform["id"], "name": platform["name"]})
+
+
+def prioritize_platforms(platforms: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for platform in [*PRIORITIZED_PLATFORMS, *platforms]:
+        if platform and platform not in seen:
+            ordered.append(platform)
+            seen.add(platform)
+    return ordered
+
+
+def build_platform_cache(
+    *,
+    provider: MetadataProvider,
+    cache_path: Path = PLATFORM_CACHE_PATH,
+    refresh: bool = False,
+    limit: int = 500,
+) -> list[str]:
+    if cache_path.exists() and not refresh:
+        return read_platform_cache(cache_path)
+    if provider.name != "igdb" or not hasattr(provider, "platforms"):
+        raise ProviderError("Platform picklist caching currently supports IGDB only.")
+    platforms = provider.platforms(limit=limit)
+    write_platform_cache(platforms, cache_path)
+    return read_platform_cache(cache_path)
+
+
+def prebuild_prioritized_cover_indexes(
+    *,
+    provider: MetadataProvider,
+    limit: int = 1000,
+    refresh: bool = False,
+) -> dict[str, int]:
+    results: dict[str, int] = {}
+    for platform in PRIORITIZED_PLATFORMS:
+        entries = build_cover_index(
+            provider=provider,
+            platform=platform,
+            index_path=default_index_path(provider.name, platform),
+            limit=limit,
+            refresh=refresh,
+        )
+        results[platform] = len(entries)
+    return results
+
+
+def platform_cache_statuses(provider_name: str, platforms: list[str]) -> list[PlatformCacheStatus]:
+    statuses: list[PlatformCacheStatus] = []
+    for platform in platforms:
+        index_path = default_index_path(provider_name, platform)
+        entries = read_cover_index(index_path)
+        statuses.append(PlatformCacheStatus(name=platform, cached=bool(entries), count=len(entries)))
+    return sorted(statuses, key=lambda item: (not item.cached, item.name.casefold()))
+
+
 def build_cover_index(
     *,
     provider: MetadataProvider,
@@ -211,4 +296,3 @@ def match_to_game_match(match: CoverMatch) -> GameMatch:
             "cover_index_path": str(entry.cover_path),
         },
     )
-

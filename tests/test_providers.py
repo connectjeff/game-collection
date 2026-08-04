@@ -45,7 +45,18 @@ class IgdbProviderTests(unittest.TestCase):
         self.assertIn("oauth2/token", post_json.call_args_list[0].args[0])
         self.assertIn("/v4/games", post_json.call_args_list[1].args[0])
 
+    def test_platforms_fetches_all_igdb_platforms(self) -> None:
+        responses = [
+            {"access_token": "token-123"},
+            [{"id": 48, "name": "PlayStation 4"}, {"id": 167, "name": "PlayStation 5"}],
+        ]
+
+        with patch("game_collection.providers._post_json", side_effect=responses):
+            provider = IgdbProvider(client_id="client", client_secret="secret")
+            platforms = provider.platforms(limit=2)
+
+        self.assertEqual(platforms, [{"id": 48, "name": "PlayStation 4"}, {"id": 167, "name": "PlayStation 5"}])
+
 
 if __name__ == "__main__":
     unittest.main()
-

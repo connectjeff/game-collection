@@ -33,7 +33,7 @@ python3 -m venv .venv
 python -m pip install -e .
 
 game-collection init
-game-collection add-manual "The Legend of Zelda: The Wind Waker" --platform "Nintendo GameCube" --status owned --played completed
+game-collection add-manual "Demon's Souls" --platform "PlayStation 5" --status owned --played completed
 game-collection list
 ```
 
@@ -49,7 +49,7 @@ For metadata lookup:
 
 ```bash
 export THEGAMESDB_API_KEY=...
-game-collection search "Metroid Prime" --platform "Nintendo GameCube" --provider thegamesdb
+game-collection search "Demon's Souls" --platform "PlayStation 5" --provider thegamesdb
 ```
 
 For IGDB:
@@ -58,7 +58,7 @@ For IGDB:
 cp .env.example .env
 # Edit .env and set IGDB_CLIENT_ID / IGDB_CLIENT_SECRET.
 game-collection credentials check --provider igdb
-game-collection search "Metroid Prime" --platform "Nintendo GameCube" --provider igdb
+game-collection search "Demon's Souls" --platform "PlayStation 5" --provider igdb
 ```
 
 ### Twitch / IGDB Credential Setup
@@ -128,12 +128,33 @@ Use the upload form to choose one or more photos directly from your computer or 
 Set:
 
 - metadata provider, usually `igdb`,
-- optional platform hint, such as `Nintendo GameCube`,
+- platform from the IGDB-backed picklist,
 - auto-import threshold, default `0.92`,
 - ownership status,
 - initial play status.
 
 Then click `Upload And Ingest`.
+
+Prioritized platform presets:
+
+- `PlayStation 5`
+- `PlayStation 4`
+- `Xbox One`
+- `Xbox Series X|S`
+
+Use `Xbox Series X|S` for Xbox Series X games because that is the IGDB platform name used for the cover-art index.
+
+When the server starts, it caches the IGDB platform list and prebuilds cover-art indexes for the prioritized systems. You can force a refresh with:
+
+```bash
+game-collection serve --refresh-platform-cache --refresh-cover-indexes
+```
+
+Or skip startup prebuilding for a quick launch:
+
+```bash
+game-collection serve --skip-cover-prebuild
+```
 
 The web UI handles the choreography:
 
@@ -300,6 +321,7 @@ Available views:
 - `Library`: browse, search, and filter the full collection.
 - `Plan Next`: view owned games that are unplayed or currently being played.
 - `Upload Photos`: upload one or more source photos, trigger cover-art matching/import, and review uncertain rows.
+- `Cache Settings`: choose which IGDB platforms should have local cover-art indexes. Cached platforms appear first, followed by uncached platforms alphabetically.
 - `Game Detail`: edit metadata, ownership state, location/condition notes, sale notes, and play status.
 
 Useful edits:

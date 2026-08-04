@@ -87,7 +87,7 @@ image = ["opencv-python", "pillow"]
 The primary command is:
 
 ```bash
-game-collection ingest-photos photos/incoming/ --provider igdb --platform "Nintendo GameCube"
+game-collection ingest-photos photos/incoming/ --provider igdb --platform "PlayStation 5"
 ```
 
 It builds or reuses an IGDB cover-art index for the selected platform, then writes:
@@ -97,3 +97,14 @@ It builds or reuses an IGDB cover-art index for the selected platform, then writ
 - `review/crops/` for detected case crops.
 
 High-confidence rows are imported automatically. Low-confidence rows stay in the audit CSV for later cleanup.
+
+Prioritized platform indexes:
+
+- `PlayStation 5`
+- `PlayStation 4`
+- `Xbox One`
+- `Xbox Series X|S`
+
+The web server prebuilds those four cover indexes at startup by default and caches the full IGDB platform list for the upload picklist. Matching should use local cached cover hashes during upload, not build platform indexes on demand.
+
+The `Cache Settings` web view lists all cached IGDB platforms first, then all uncached IGDB platforms alphabetically. Submitting checked platforms builds local cover-art indexes for them.

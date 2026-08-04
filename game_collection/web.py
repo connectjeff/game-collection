@@ -14,7 +14,14 @@ from typing import Any
 
 from . import db
 from .automation import import_accepted_rows
-from .cover_match import build_cover_index, default_index_path
+from .cover_match import (
+    PRIORITIZED_PLATFORMS,
+    build_cover_index,
+    build_platform_cache,
+    default_index_path,
+    platform_cache_statuses,
+    prebuild_prioritized_cover_indexes,
+)
 from .photo_ingest import PhotoIngestError, detect_photo_candidates
 from .providers import ProviderError, get_provider
 from .review import INTAKE_FIELDS, read_review, write_review
@@ -22,7 +29,8 @@ from .review import INTAKE_FIELDS, read_review, write_review
 
 OWNERSHIP_STATUSES = ["owned", "would_sell", "sold", "loaned", "wishlist"]
 PLAY_STATUSES = ["unplayed", "playing", "completed", "retired"]
-PROVIDER_CHOICES = ["igdb", "thegamesdb", "rawg"]
+PROVIDER_CHOICES = ["igdb"]
+PLATFORM_PRESETS = PRIORITIZED_PLATFORMS
 WEB_INGEST_ROOT = Path("review/web-ingests")
 
 
@@ -217,6 +225,7 @@ def _layout(title: str, body: str) -> bytes:
     <a href="/">Game Collection</a>
     <a href="/plan">Plan Next</a>
     <a href="/ingest">Upload Photos</a>
+    <a href="/caches">Cache Settings</a>
   </header>
   <main>{body}</main>
 </body>
@@ -226,6 +235,7 @@ def _layout(title: str, body: str) -> bytes:
 
 class CollectionHandler(BaseHTTPRequestHandler):
     db_path: Path
+    platform_options: list[str] = PLATFORM_PRESETS
 
     def log_message(self, format: str, *args: Any) -> None:
         return
@@ -290,6 +300,9 @@ class CollectionHandler(BaseHTTPRequestHandler):
         if parsed.path == "/ingest":
             self._send_html("Upload Photos", self._ingest_form())
             return
+        if parsed.path == "/caches":
+            self._send_html("Cache Settings", self._cache_settings())
+            return
         if parsed.path.startswith("/ingest/"):
             run_id = parsed.path.removeprefix("/ingest/").strip("/")
             self._send_html("Ingest Results", self._ingest_results(run_id))
@@ -311,6 +324,9 @@ class CollectionHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/ingest":
             self._handle_ingest_upload()
+            return
+        if parsed.path == "/caches":
+            self._handle_cache_settings()
             return
         if parsed.path.startswith("/ingest/") and parsed.path.endswith("/review"):
             run_id = parsed.path.split("/")[2]
@@ -431,9 +447,68 @@ class CollectionHandler(BaseHTTPRequestHandler):
             conn.close()
         return f"<h1>Plan Next</h1><p class=\"muted\">Owned games that are unplayed or in progress.</p>{self._rows_table(rows)}"
 
+    def _cache_settings(self, message: str | None = None, *, error: bool = False) -> str:
+        notice = f'<div class="notice{" error" if error else ""}">{_h(message)}</div>' if message else ""
+        statuses = platform_cache_statuses("igdb", self.platform_options)
+        rows = []
+        for status in statuses:
+            checked = " checked" if status.cached else ""
+            cached_text = f"{status.count} covers" if status.cached else "not cached"
+            rows.append(
+                f"""
+<tr>
+  <td><input type="checkbox" name="platform" value="{_h(status.name)}"{checked}></td>
+  <td>{_h(status.name)}</td>
+  <td><span class="badge{' sold' if not status.cached else ''}">{_h(cached_text)}</span></td>
+</tr>"""
+            )
+        return f"""
+<h1>Cache Settings</h1>
+{notice}
+<section class="panel">
+  <p class="muted">Choose platforms to build local cover-art image indexes for. Cached platforms are listed first; uncached platforms are alphabetical.</p>
+  <form method="post" action="/caches">
+    <label>Cover index limit
+      <input name="cover_index_limit" type="number" min="1" step="1" value="1000">
+    </label>
+    <table>
+      <thead><tr><th></th><th>Platform</th><th>Status</th></tr></thead>
+      <tbody>{''.join(rows)}</tbody>
+    </table>
+    <div class="actions"><button type="submit">Build Selected Indexes</button></div>
+  </form>
+</section>
+"""
+
+    def _handle_cache_settings(self) -> None:
+        form = urllib.parse.parse_qs(self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8"))
+        selected = [item for item in form.get("platform", []) if item]
+        limit = int((form.get("cover_index_limit") or ["1000"])[-1])
+        if not selected:
+            self._send_html("Cache Settings", self._cache_settings("Choose at least one platform.", error=True))
+            return
+        try:
+            provider = get_provider("igdb")
+            built: list[str] = []
+            for platform in selected:
+                entries = build_cover_index(
+                    provider=provider,
+                    platform=platform,
+                    index_path=default_index_path("igdb", platform),
+                    limit=limit,
+                )
+                built.append(f"{platform}: {len(entries)} covers")
+            self._send_html("Cache Settings", self._cache_settings("Built indexes for " + "; ".join(built)))
+        except (ProviderError, ValueError) as exc:
+            self._send_html("Cache Settings", self._cache_settings(str(exc), error=True), HTTPStatus.BAD_REQUEST)
+
     def _ingest_form(self, message: str | None = None, *, error: bool = False) -> str:
         notice = f'<div class="notice{" error" if error else ""}">{_h(message)}</div>' if message else ""
         provider_options = "".join(f'<option value="{provider}">{provider}</option>' for provider in PROVIDER_CHOICES)
+        platform_options = "".join(
+            f'<option value="{_h(platform)}">{_h(platform)}</option>'
+            for platform in self.platform_options
+        )
         status_options = "".join(f'<option value="{status}">{status}</option>' for status in OWNERSHIP_STATUSES)
         played_options = "".join(f'<option value="{status}">{status}</option>' for status in PLAY_STATUSES)
         return f"""
@@ -449,7 +524,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
         <select name="provider">{provider_options}</select>
       </label>
       <label>Platform hint
-        <input name="platform" placeholder="Nintendo GameCube">
+        <select name="platform" required>{platform_options}</select>
       </label>
       <label>Auto-import threshold
         <input name="accept_threshold" type="number" min="0" max="1" step="0.01" value="0.92">
@@ -743,9 +818,36 @@ class CollectionHandler(BaseHTTPRequestHandler):
 </div>"""
 
 
-def serve(db_path: Path, host: str = "127.0.0.1", port: int = 8765) -> None:
+def serve(
+    db_path: Path,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    *,
+    prebuild_cover_indexes: bool = True,
+    refresh_cover_indexes: bool = False,
+    refresh_platform_cache: bool = False,
+    cover_index_limit: int = 1000,
+) -> None:
     db.init_db(db_path)
-    handler = type("ConfiguredCollectionHandler", (CollectionHandler,), {"db_path": db_path})
+    platform_options = PLATFORM_PRESETS
+    try:
+        provider = get_provider("igdb")
+        platform_options = build_platform_cache(provider=provider, refresh=refresh_platform_cache)
+        if prebuild_cover_indexes:
+            print("Prebuilding prioritized cover indexes...")
+            for platform, count in prebuild_prioritized_cover_indexes(
+                provider=provider,
+                limit=cover_index_limit,
+                refresh=refresh_cover_indexes,
+            ).items():
+                print(f"  {platform}: {count} covers indexed")
+    except ProviderError as exc:
+        print(f"Warning: could not prebuild IGDB caches: {exc}")
+    handler = type(
+        "ConfiguredCollectionHandler",
+        (CollectionHandler,),
+        {"db_path": db_path, "platform_options": platform_options},
+    )
     server = ThreadingHTTPServer((host, port), handler)
     print(f"Serving game collection at http://{host}:{port}")
     server.serve_forever()

@@ -248,7 +248,15 @@ def cmd_credentials_check(args: argparse.Namespace) -> int:
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
-    serve(args.db, host=args.host, port=args.port)
+    serve(
+        args.db,
+        host=args.host,
+        port=args.port,
+        prebuild_cover_indexes=not args.skip_cover_prebuild,
+        refresh_cover_indexes=args.refresh_cover_indexes,
+        refresh_platform_cache=args.refresh_platform_cache,
+        cover_index_limit=args.cover_index_limit,
+    )
     return 0
 
 
@@ -357,6 +365,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_db_arg(serve_cmd)
     serve_cmd.add_argument("--host", default="127.0.0.1")
     serve_cmd.add_argument("--port", type=int, default=8765)
+    serve_cmd.add_argument("--cover-index-limit", type=int, default=1000)
+    serve_cmd.add_argument("--refresh-platform-cache", action="store_true")
+    serve_cmd.add_argument("--refresh-cover-indexes", action="store_true")
+    serve_cmd.add_argument("--skip-cover-prebuild", action="store_true")
     serve_cmd.set_defaults(func=cmd_serve)
 
     return parser
