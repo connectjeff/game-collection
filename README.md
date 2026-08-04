@@ -214,9 +214,8 @@ No rows are imported automatically from photo upload.
 
 For each suggested row:
 
-- fix `candidate_title`,
 - confirm `platform`,
-- type in `matched_title` to search cached platform metadata,
+- type in `matched_title` to overwrite the suggestion and search cached platform metadata,
 - choose the correct title to refresh the matched cover image,
 - click the accept icon to move it to the `Accepted` table,
 - click the ignore icon to move it to the `Ignored` table.

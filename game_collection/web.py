@@ -68,6 +68,7 @@ def _cover_thumb(
     *,
     row_index: int | None = None,
     role: str | None = None,
+    opens_modal: bool = False,
 ) -> str:
     sample_attrs = ""
     image_attrs = ""
@@ -88,9 +89,15 @@ def _cover_thumb(
             "</div>"
         )
     src = urllib.parse.quote(str(path))
+    image = f'<img class="crop-thumb" src="/media?path={src}" alt="{_h(alt)}"{image_attrs}>'
+    if opens_modal:
+        image = (
+            f'<button class="thumb-button" type="button" data-modal-image="/media?path={src}" '
+            f'aria-label="Open {_h(label)} image">{image}</button>'
+        )
     return (
         f'<div class="cover-sample"{sample_attrs}>'
-        f'<img class="crop-thumb" src="/media?path={src}" alt="{_h(alt)}"{image_attrs}>'
+        f"{image}"
         f'<span class="cover-label">{_h(label)}</span>'
         "</div>"
     )
@@ -284,11 +291,10 @@ def _layout(title: str, body: str) -> bytes:
       table-layout: fixed;
     }}
     .review-table th:nth-child(1), .review-table td:nth-child(1) {{ width: 210px; }}
-    .review-table th:nth-child(2), .review-table td:nth-child(2) {{ width: 20%; }}
-    .review-table th:nth-child(3), .review-table td:nth-child(3) {{ width: 16%; }}
-    .review-table th:nth-child(4), .review-table td:nth-child(4) {{ width: auto; }}
-    .review-table th:nth-child(5), .review-table td:nth-child(5) {{ width: 120px; }}
-    .review-table th:nth-child(6), .review-table td:nth-child(6) {{ width: 1px; padding-left: 0; padding-right: 0; }}
+    .review-table th:nth-child(2), .review-table td:nth-child(2) {{ width: 18%; }}
+    .review-table th:nth-child(3), .review-table td:nth-child(3) {{ width: auto; }}
+    .review-table th:nth-child(4), .review-table td:nth-child(4) {{ width: 120px; }}
+    .review-table th:nth-child(5), .review-table td:nth-child(5) {{ width: 1px; padding-left: 0; padding-right: 0; }}
     .decision-actions {{
       display: flex;
       gap: 6px;
@@ -374,6 +380,32 @@ def _layout(title: str, body: str) -> bytes:
       border: 1px solid var(--line);
       border-radius: 5px;
       background: #e2e6ea;
+    }}
+    .thumb-button {{
+      display: block;
+      padding: 0;
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      cursor: zoom-in;
+    }}
+    .image-modal {{
+      position: fixed;
+      inset: 0;
+      z-index: 10;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: rgba(20, 31, 42, 0.74);
+    }}
+    .image-modal[hidden] {{ display: none; }}
+    .image-modal img {{
+      max-width: min(96vw, 1200px);
+      max-height: 92vh;
+      object-fit: contain;
+      border-radius: 8px;
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.35);
+      background: #fff;
     }}
     .cover-pair {{
       display: flex;
@@ -534,9 +566,33 @@ def _layout(title: str, body: str) -> bytes:
       updateOutcomeCounts();
     }}
 
+    function installImageModal() {{
+      let modal = document.querySelector("[data-role='image-modal']");
+      if (!modal) {{
+        modal = document.createElement("div");
+        modal.className = "image-modal";
+        modal.dataset.role = "image-modal";
+        modal.hidden = true;
+        modal.innerHTML = '<img alt="Expanded uploaded cover">';
+        document.body.appendChild(modal);
+      }}
+      const image = modal.querySelector("img");
+      document.querySelectorAll("[data-modal-image]").forEach((button) => {{
+        button.addEventListener("click", () => {{
+          image.src = button.dataset.modalImage;
+          modal.hidden = false;
+        }});
+      }});
+      modal.addEventListener("click", () => {{
+        modal.hidden = true;
+        image.removeAttribute("src");
+      }});
+    }}
+
     document.addEventListener("DOMContentLoaded", () => {{
       installMatchInputs();
       installDecisionActions();
+      installImageModal();
     }});
   </script>
 </head>
@@ -1025,7 +1081,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
             crop = row.get("crop_path")
             decision = row.get("decision") if row.get("decision") in grouped_rows else "review"
             matched_cover = _matched_cover_path(row)
-            crop_html = _cover_thumb(crop, "Uploaded", "Detected crop from uploaded photo")
+            crop_html = _cover_thumb(crop, "Uploaded", "Detected crop from uploaded photo", opens_modal=True)
             matched_cover_html = _cover_thumb(
                 matched_cover,
                 "Matched",
@@ -1039,6 +1095,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 for field in (
                     "provider",
                     "provider_game_id",
+                    "candidate_title",
                     "release_date",
                     "developer",
                     "publisher",
@@ -1063,7 +1120,6 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 f"""
 <tr data-row="{index}" data-decision="{_h(decision)}">
   <td>{cover_pair_html}<input type="hidden" name="row_{index}_photo_path" value="{_h(row.get('photo_path'))}"><input type="hidden" name="row_{index}_crop_path" value="{_h(crop)}"></td>
-  <td><textarea class="title-field" name="row_{index}_candidate_title" rows="2">{_h(row.get('candidate_title'))}</textarea></td>
   <td><input name="row_{index}_platform" value="{_h(row.get('platform'))}"></td>
   <td>
     <div class="match-control">
@@ -1084,7 +1140,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
   <h2>{_h(title)} <span class="badge" data-role="{decision}-count">{len(grouped_rows[decision])}</span></h2>
   <div class="empty-state" data-role="{decision}-empty"{empty_hidden}>{_h(empty_text)}</div>
   <table class="review-table">
-    <thead><tr><th>Covers</th><th>Suggested</th><th>Platform</th><th>Matched Title</th><th>Action</th><th></th></tr></thead>
+    <thead><tr><th>Covers</th><th>Platform</th><th>Matched Title</th><th>Action</th><th></th></tr></thead>
     <tbody data-role="{decision}-rows">{body_rows}</tbody>
   </table>
 </section>"""
