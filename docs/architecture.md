@@ -77,11 +77,14 @@ The photo recognizer should be optimized for accuracy over magic:
 
 ## Automated Ingest
 
-Photo ingest lives behind optional dependencies:
+Photo ingest depends on the image-processing stack installed by the base project package:
 
 ```toml
-[project.optional-dependencies]
-image = ["opencv-python", "pillow"]
+dependencies = [
+    "numpy",
+    "opencv-python",
+    "pillow",
+]
 ```
 
 The primary command is:

@@ -107,10 +107,10 @@ Best results:
 
 ### 2. Open the local web UI
 
-Install optional image-processing dependencies:
+Install the project dependencies:
 
 ```bash
-python -m pip install -e '.[image]'
+python -m pip install -e .
 ```
 
 Start the local interface:
