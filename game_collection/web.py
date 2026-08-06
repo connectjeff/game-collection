@@ -36,6 +36,7 @@ from .review import INTAKE_FIELDS, read_review, write_review
 OWNERSHIP_STATUSES = ["owned", "would_sell", "sold", "loaned", "wishlist"]
 PLAY_STATUSES = ["unplayed", "playing", "completed", "retired"]
 PROVIDER_CHOICES = ["igdb"]
+EXPECTED_TITLE_COUNTS = list(range(1, 31))
 PLATFORM_PRESETS = PRIORITIZED_PLATFORMS
 WEB_INGEST_ROOT = Path("review/web-ingests")
 AUTOCOMPLETE_LIMIT = 25
@@ -47,6 +48,46 @@ def _h(value: Any) -> str:
 
 def _selected(left: str | None, right: str) -> str:
     return " selected" if left == right else ""
+
+
+def _blank_review_row(*, platform: str | None, play_status: str | None, note: str) -> dict[str, str]:
+    return {
+        "photo_path": "",
+        "crop_path": "",
+        "candidate_title": "",
+        "platform": platform or "",
+        "play_status": play_status or "unplayed",
+        "provider": "",
+        "provider_game_id": "",
+        "matched_title": "",
+        "release_date": "",
+        "developer": "",
+        "publisher": "",
+        "description": "",
+        "cover_url": "",
+        "confidence": "",
+        "decision": "review",
+        "notes": note,
+    }
+
+
+def _fit_review_rows_to_expected_count(
+    rows: list[dict[str, str]],
+    *,
+    expected_count: int,
+    platform: str | None,
+    play_status: str | None,
+) -> list[dict[str, str]]:
+    fitted = rows[:expected_count]
+    while len(fitted) < expected_count:
+        fitted.append(
+            _blank_review_row(
+                platform=platform,
+                play_status=play_status,
+                note="Expected title placeholder; add a matched title manually.",
+            )
+        )
+    return fitted
 
 
 def _cached_platform_options(platforms: list[str]) -> list[str]:
@@ -1293,6 +1334,10 @@ class CollectionHandler(BaseHTTPRequestHandler):
         )
         status_options = "".join(f'<option value="{status}">{status}</option>' for status in OWNERSHIP_STATUSES)
         played_options = "".join(f'<option value="{status}">{status}</option>' for status in PLAY_STATUSES)
+        expected_title_options = "".join(
+            f'<option value="{count}"{" selected" if count == 1 else ""}>{count}</option>'
+            for count in EXPECTED_TITLE_COUNTS
+        )
         return f"""
 <h1>Upload Photos</h1>
 {notice}
@@ -1307,6 +1352,9 @@ class CollectionHandler(BaseHTTPRequestHandler):
       </label>
       <label>Platform hint
         {platform_control}
+      </label>
+      <label>Expected titles
+        <select name="expected_titles">{expected_title_options}</select>
       </label>
       <label>Ownership status
         <select name="status">{status_options}</select>
@@ -1347,6 +1395,9 @@ class CollectionHandler(BaseHTTPRequestHandler):
             platform = fields.get("platform") or None
             status = fields.get("status") or "owned"
             played = fields.get("played") or "unplayed"
+            expected_titles = int(fields.get("expected_titles") or "1")
+            if expected_titles not in EXPECTED_TITLE_COUNTS:
+                raise ValueError("Expected titles must be between 1 and 30.")
             if not platform:
                 self._send_html("Upload Photos", self._ingest_form("Choose a cached platform.", error=True))
                 return
@@ -1376,6 +1427,13 @@ class CollectionHandler(BaseHTTPRequestHandler):
             for row in rows:
                 row["decision"] = "review"
                 row["play_status"] = played
+            detected_count = len(rows)
+            rows = _fit_review_rows_to_expected_count(
+                rows,
+                expected_count=expected_titles,
+                platform=platform,
+                play_status=played,
+            )
 
             write_review(self._audit_path(run_id), rows)
 
@@ -1385,6 +1443,8 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 "status": status,
                 "played": played,
                 "uploaded": str(len(image_files)),
+                "expected_titles": str(expected_titles),
+                "detected_candidates": str(detected_count),
                 "candidates": str(len(rows)),
                 "cover_index_entries": str(len(cover_entries)),
                 "imported": "0",
@@ -1424,6 +1484,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
 <div class="ingest-summary-grid">
   <section class="panel">
     <p><strong>{len(rows)}</strong> suggested match(es), <strong>{accepted}</strong> marked for import, <strong>{needs_review}</strong> awaiting review.</p>
+    <p class="muted">Expected titles: {_h(summary.get('expected_titles') or len(rows))} | Detected boxes: {_h(summary.get('detected_candidates') or len(rows))}</p>
     <p class="muted">Compared detected covers against {_h(summary.get('cover_index_entries', '0'))} indexed cover images.</p>
     <p class="muted">Provider: {_h(summary.get('provider'))} | Platform hint: {_h(summary.get('platform')) or 'none'}</p>
   </section>
