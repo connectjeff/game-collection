@@ -177,6 +177,8 @@ Barcode matches are treated as exact catalog matches. If no barcode is detected,
 
 Barcode identity is cached separately from IGDB metadata because IGDB is not a complete UPC database. The cache is CSV based so you can import known UPC/SKU exports from other sources without committing private library data.
 
+The cache can cover any gaming platform that appears in the source barcode data. Modern retail platforms usually use UPC-A/GTIN-12 in North America and EAN/JAN/GTIN-13 internationally; older platforms may have no barcode, inconsistent regional labels, or incomplete public records.
+
 The committed example is:
 
 ```text
@@ -196,10 +198,22 @@ Build or rebuild the cache from one or more local CSV files or folders:
 game-collection build-barcode-cache --source examples/barcode-catalog.example.csv
 ```
 
+CSV URLs are also accepted:
+
+```bash
+game-collection build-barcode-cache --source "https://example.com/video-game-barcodes.csv"
+```
+
 Limit output to specific platforms:
 
 ```bash
 game-collection build-barcode-cache --source data/my-barcodes/ --platform "Nintendo Switch" --platform "PlayStation 5"
+```
+
+PriceCharting-style exports are supported when you have access to a CSV download:
+
+```bash
+game-collection build-barcode-cache --source data/pricecharting.csv --source-provider pricecharting
 ```
 
 CSV columns are:
@@ -208,7 +222,17 @@ CSV columns are:
 barcode,title,platform,provider,provider_game_id,release_date,developer,publisher,description,cover_url
 ```
 
-The scanner accepts valid GS1 GTIN-8, GTIN-12/UPC-A, GTIN-13/EAN/JAN, and GTIN-14 values. Platform hints rank common publisher/manufacturer prefixes first, such as Nintendo `045496`/`4902370`, PlayStation `711719`/`4948872`, and Xbox `885370`/`889842`, but exact importing still requires a cached barcode row.
+The importer also recognizes common external column names such as `upc`, `ean`, `gtin`, `product-name`, `console-name`, and `release-date`.
+
+The scanner accepts valid GS1 GTIN-8, GTIN-12/UPC-A, GTIN-13/EAN/JAN, and GTIN-14 values. Platform hints rank common publisher/manufacturer prefixes first, such as Nintendo `045496`/`4902370`, PlayStation `711719`/`4948872`, Xbox `885370`/`889842`, Sega `010086`/`4974365`, Capcom `013388`, Electronic Arts `014633`, Activision `047875`, Ubisoft `008888`, Square Enix `662248`, Take-Two `710425`, Warner `883929`, and Limited Run `812303`, but exact importing still requires a cached barcode row.
+
+Known source constraints:
+
+- PriceCharting exposes UPC lookup and paid CSV downloads that can seed broad multi-platform caches.
+- MobyGames has a game API, but product identifiers are not part of the hobbyist tier; use only if your subscription allows product-code export.
+- UPCDatabase and upc.dev can look up known barcodes, but they are not practical bulk discovery sources by themselves.
+- LaunchBox has useful local metadata exports, but no official public Games Database API for this use case.
+- Do not scrape websites into the public project unless their terms explicitly allow it.
 
 ### Backend validation with local sample photos
 

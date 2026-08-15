@@ -220,6 +220,7 @@ def cmd_build_barcode_cache(args: argparse.Namespace) -> int:
         source_paths=source_paths,
         platforms=args.platform or None,
         cache_root=args.cache_root,
+        provider=args.source_provider,
     )
     for platform, count in results.items():
         print(f"{platform}: {count} barcode(s)")
@@ -384,10 +385,10 @@ def build_parser() -> argparse.ArgumentParser:
     barcode_cache = subparsers.add_parser("build-barcode-cache", help="Build local platform barcode lookup caches from CSV sources")
     barcode_cache.add_argument(
         "--source",
-        type=Path,
         action="append",
-        help="CSV file or folder containing barcode catalog CSVs; repeat for multiple sources",
+        help="CSV file, folder, or CSV URL containing barcode catalog data; repeat for multiple sources",
     )
+    barcode_cache.add_argument("--source-provider", help="Provider label to store for rows that do not already include provider")
     barcode_cache.add_argument(
         "--platform",
         action="append",

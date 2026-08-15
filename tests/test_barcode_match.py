@@ -138,6 +138,31 @@ class BarcodeMatchTests(unittest.TestCase):
         self.assertEqual(len(cached), 1)
         self.assertEqual(cached[0].barcode, "045496905651")
 
+    def test_builds_cache_from_pricecharting_style_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "pricecharting.csv"
+            cache_root = root / "barcodes"
+            source.write_text(
+                "id,product-name,console-name,upc,release-date\n"
+                "123,Super Mario Galaxy + Super Mario Galaxy 2,Nintendo Switch,045496905651,2025-10-02\n"
+                "456,Example Xbox Game,Xbox Series X|S,889842123456,2024-01-01\n",
+                encoding="utf-8",
+            )
+
+            results = build_barcode_cache(
+                source_paths=[source],
+                cache_root=cache_root,
+                provider="pricecharting",
+            )
+            switch_entries = read_barcode_catalog(cache_root / "nintendo-switch" / "catalog.csv")
+
+        self.assertEqual(results["Nintendo Switch"], 1)
+        self.assertEqual(results["Xbox Series X|S"], 1)
+        self.assertEqual(results["all"], 2)
+        self.assertEqual(switch_entries[0].provider, "pricecharting")
+        self.assertEqual(switch_entries[0].provider_game_id, "123")
+
     @unittest.skipUnless(ATTACHED_BARCODE_PHOTO.exists(), "attached barcode sample is unavailable")
     def test_detect_barcodes_reads_attached_sample(self) -> None:
         self.assertIn("045496905651", detect_barcodes(ATTACHED_BARCODE_PHOTO, platform="Nintendo Switch"))

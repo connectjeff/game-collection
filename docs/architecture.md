@@ -117,6 +117,8 @@ Barcode caches are built from CSV sources:
 game-collection build-barcode-cache --source examples/barcode-catalog.example.csv
 ```
 
+The builder accepts local CSV files, folders of CSV files, and CSV URLs. It recognizes the project schema plus common export column names such as `upc`, `ean`, `gtin`, `product-name`, and `console-name`, so a broad source export can populate caches for every platform present in that export.
+
 The scanner anticipates standard retail game packaging codes:
 
 - GTIN-12 / UPC-A for North American releases.
@@ -124,6 +126,6 @@ The scanner anticipates standard retail game packaging codes:
 - GTIN-8 / UPC-E for compact labels.
 - GTIN-14 as a fallback for data sources that store zero-padded GTINs.
 
-Platform hints do not make a match by themselves. They validate and rank decoded codes using common prefixes such as Nintendo `045496`/`4902370`, PlayStation `711719`/`4948872`, and Xbox `885370`/`889842`; import identity still requires an exact cached barcode row.
+Platform hints do not make a match by themselves. They validate and rank decoded codes using common prefixes such as Nintendo `045496`/`4902370`, PlayStation `711719`/`4948872`, Xbox `885370`/`889842`, Sega `010086`/`4974365`, Capcom `013388`, Electronic Arts `014633`, Activision `047875`, Ubisoft `008888`, Square Enix `662248`, Take-Two `710425`, Warner `883929`, and Limited Run `812303`; import identity still requires an exact cached barcode row.
 
 The `Cache Settings` web view lists all cached IGDB platforms first, then all uncached IGDB platforms alphabetically. Submitting checked platforms builds local metadata indexes for them.

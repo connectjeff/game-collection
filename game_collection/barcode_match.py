@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import csv
 import re
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .cover_match import CoverIndexEntry, slugify
 from .providers import GameMatch
@@ -75,6 +76,37 @@ PLATFORM_BARCODE_HINTS = {
     ),
 }
 
+GAME_PUBLISHER_PREFIXES = (
+    "008888",  # Ubisoft
+    "010086",  # Sega of America
+    "013388",  # Capcom
+    "014633",  # Electronic Arts
+    "045496",  # Nintendo of America
+    "047875",  # Activision
+    "071171",  # Sony / PlayStation
+    "093155",  # Bethesda
+    "662248",  # Square Enix
+    "710425",  # Take-Two / 2K
+    "711719",  # Sony / PlayStation
+    "812303",  # Limited Run Games
+    "883929",  # Warner Bros.
+    "885370",  # Microsoft
+    "889842",  # Microsoft
+    "4902370",  # Nintendo Japan
+    "4948872",  # Sony Japan
+    "4974365",  # Sega Japan
+)
+
+BARCODE_COLUMN_ALIASES = ("barcode", "upc", "ean", "gtin", "product-code", "product_code", "identifier")
+TITLE_COLUMN_ALIASES = ("title", "product-name", "product_name", "name", "game", "game-title", "game_title")
+PLATFORM_COLUMN_ALIASES = ("platform", "console-name", "console_name", "console", "system", "platform-name", "platform_name")
+PROVIDER_ID_COLUMN_ALIASES = ("id", "product-id", "product_id", "provider_game_id", "pricecharting-id")
+PROVIDER_COLUMN_ALIASES = ("provider", "source", "data-source", "data_source")
+RELEASE_DATE_COLUMN_ALIASES = ("release-date", "release_date", "released")
+PUBLISHER_COLUMN_ALIASES = ("publisher", "publishers")
+DEVELOPER_COLUMN_ALIASES = ("developer", "developers")
+COVER_URL_COLUMN_ALIASES = ("cover_url", "cover-url", "image", "image-url", "image_url")
+
 
 def platform_barcode_hint(platform: str | None) -> BarcodeFormatHint:
     normalized = (platform or "").casefold()
@@ -96,7 +128,8 @@ def _barcode_sort_key(value: str, platform: str | None) -> tuple[int, str]:
     normalized = normalize_barcode(value)
     hint = platform_barcode_hint(platform)
     preferred = any(normalized.startswith(prefix) for prefix in hint.preferred_prefixes)
-    return (0 if preferred else 1, normalized)
+    game_publisher = any(normalized.startswith(prefix) for prefix in GAME_PUBLISHER_PREFIXES)
+    return (0 if preferred else 1 if game_publisher else 2, normalized)
 
 
 def normalize_barcode(value: str) -> str:
@@ -198,12 +231,13 @@ def write_barcode_catalog(path: Path, entries: list[BarcodeCatalogEntry]) -> Non
 
 def build_barcode_cache(
     *,
-    source_paths: list[Path],
+    source_paths: list[str | Path],
     platforms: list[str] | None = None,
     cache_root: Path = BARCODE_CACHE_ROOT,
+    provider: str | None = None,
 ) -> dict[str, int]:
     entries = _dedupe_barcode_entries(
-        entry
+        _with_provider(entry, provider)
         for source_path in source_paths
         for entry in _read_barcode_sources(source_path)
     )
@@ -237,13 +271,83 @@ def barcode_cache_statuses(platforms: list[str]) -> dict[str, int]:
     return {platform: len(read_barcode_catalog(default_barcode_cache_path(platform))) for platform in platforms}
 
 
-def _read_barcode_sources(path: Path) -> list[BarcodeCatalogEntry]:
+def _read_barcode_sources(path: str | Path) -> list[BarcodeCatalogEntry]:
+    if isinstance(path, str) and _is_url(path):
+        return _read_external_barcode_catalog_from_text(_read_url_text(path))
+    path = Path(path)
     if path.is_dir():
         entries: list[BarcodeCatalogEntry] = []
         for item in sorted(path.glob("*.csv")):
-            entries.extend(read_barcode_catalog(item))
+            entries.extend(_read_external_barcode_catalog(item))
         return entries
-    return read_barcode_catalog(path)
+    return _read_external_barcode_catalog(path)
+
+
+def _is_url(value: str) -> bool:
+    return value.startswith("https://") or value.startswith("http://")
+
+
+def _read_url_text(url: str) -> str:
+    request = urllib.request.Request(url, headers={"User-Agent": "game-collection/0.1"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return response.read().decode("utf-8-sig")
+
+
+def _read_external_barcode_catalog(path: Path) -> list[BarcodeCatalogEntry]:
+    with path.open("r", newline="", encoding="utf-8-sig") as handle:
+        return _read_external_barcode_catalog_from_rows(csv.DictReader(handle))
+
+
+def _read_external_barcode_catalog_from_text(text: str) -> list[BarcodeCatalogEntry]:
+    return _read_external_barcode_catalog_from_rows(csv.DictReader(text.splitlines()))
+
+
+def _read_external_barcode_catalog_from_rows(rows: Iterable[dict[str, str]]) -> list[BarcodeCatalogEntry]:
+    entries: list[BarcodeCatalogEntry] = []
+    for row in rows:
+        normalized_row = {str(key).strip().casefold(): value for key, value in row.items() if key is not None}
+        barcode = normalize_barcode(_first_value(normalized_row, BARCODE_COLUMN_ALIASES))
+        title = _first_value(normalized_row, TITLE_COLUMN_ALIASES).strip()
+        if not barcode or not title or not is_valid_gtin(barcode):
+            continue
+        entries.append(
+            BarcodeCatalogEntry(
+                barcode=barcode,
+                title=title,
+                platform=_first_value(normalized_row, PLATFORM_COLUMN_ALIASES).strip() or None,
+                provider=_first_value(normalized_row, PROVIDER_COLUMN_ALIASES).strip() or None,
+                provider_game_id=_first_value(normalized_row, PROVIDER_ID_COLUMN_ALIASES).strip() or None,
+                release_date=_first_value(normalized_row, RELEASE_DATE_COLUMN_ALIASES).strip() or None,
+                developer=_first_value(normalized_row, DEVELOPER_COLUMN_ALIASES).strip() or None,
+                publisher=_first_value(normalized_row, PUBLISHER_COLUMN_ALIASES).strip() or None,
+                cover_url=_first_value(normalized_row, COVER_URL_COLUMN_ALIASES).strip() or None,
+            )
+        )
+    return entries
+
+
+def _first_value(row: dict[str, str], aliases: tuple[str, ...]) -> str:
+    for alias in aliases:
+        if alias in row and row[alias] is not None:
+            return str(row[alias])
+    return ""
+
+
+def _with_provider(entry: BarcodeCatalogEntry, provider: str | None) -> BarcodeCatalogEntry:
+    if not provider or entry.provider:
+        return entry
+    return BarcodeCatalogEntry(
+        barcode=entry.barcode,
+        title=entry.title,
+        platform=entry.platform,
+        provider=provider,
+        provider_game_id=entry.provider_game_id,
+        release_date=entry.release_date,
+        developer=entry.developer,
+        publisher=entry.publisher,
+        description=entry.description,
+        cover_url=entry.cover_url,
+    )
 
 
 def _dedupe_barcode_entries(entries: list[BarcodeCatalogEntry] | Any) -> list[BarcodeCatalogEntry]:
