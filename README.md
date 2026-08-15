@@ -128,14 +128,14 @@ Use the upload form to choose one or more photos directly from your computer or 
 Set:
 
 - metadata provider, usually `igdb`,
-- platform from the cached IGDB cover-index picklist,
+- platform from the cached IGDB platform picklist,
 - expected title count from 1 to 30,
 - ownership status,
 - initial play status.
 
-The selected platform is also used as a detector hint. For PS5, PS4, Xbox One, and Xbox Series X|S, the importer looks for Blu-ray-style case proportions and filters out rectangles that are too large, too small, or too far from the expected case shape.
+The importer scans uploaded photos for barcodes and UPC/EAN codes. Exact matches come from a local ignored CSV at `review/barcodes/catalog.csv`. Use `examples/barcode-catalog.example.csv` as the format reference.
 
-The expected title count controls the initial review queue size. If the detector finds fewer boxes than expected, the review queue is padded with blank manual rows. If it finds more, the queue is capped to the expected count.
+The expected title count controls the initial review queue size. If barcode scanning finds fewer matches than expected, the review queue is padded with blank manual rows. If it finds more, the queue is capped to the expected count.
 
 Then click `Upload And Ingest`.
 
@@ -146,9 +146,9 @@ Prioritized platform presets:
 - `Xbox One`
 - `Xbox Series X|S`
 
-Use `Xbox Series X|S` for Xbox Series X games because that is the IGDB platform name used for the cover-art index.
+Use `Xbox Series X|S` for Xbox Series X games because that is the IGDB platform name used for cached metadata.
 
-The upload platform selector only shows platforms that already have a local cover-art index. Use `Cache Settings` to choose platforms and build complete local indexes for them.
+The upload platform selector only shows platforms that already have local cached metadata. Use `Cache Settings` to choose platforms and build complete local indexes for title autocomplete and cover art display.
 
 When the server starts, it caches the IGDB platform list and starts prebuilding complete cover-art indexes for the prioritized systems in the background. You can force a refresh with:
 
@@ -165,13 +165,50 @@ game-collection serve --skip-cover-prebuild
 The web UI handles the choreography:
 
 - stores uploaded photos in an ignored local run folder,
-- crops detected game cases,
-- compares each crop against an already-cached IGDB cover-art index,
-- shows suggested matches as side-by-side uploaded crop and cached cover images,
+- scans uploaded photos for barcodes,
+- matches decoded codes against a local platform barcode cache,
+- shows database cover art for barcode/title matches when cached metadata is available,
 - lets you correct the matched title from cached platform metadata,
 - imports only rows you manually accept.
 
-The image matcher is treated as a suggestion engine. The browser review page is the source of truth for deciding what gets imported.
+Barcode matches are treated as exact catalog matches. If no barcode is detected, or if a detected barcode is not in the local cache, the browser review page prompts for title and platform.
+
+### Barcode caches
+
+Barcode identity is cached separately from IGDB metadata because IGDB is not a complete UPC database. The cache is CSV based so you can import known UPC/SKU exports from other sources without committing private library data.
+
+The committed example is:
+
+```text
+examples/barcode-catalog.example.csv
+```
+
+Local caches live under ignored paths:
+
+```text
+review/barcodes/catalog.csv
+review/barcodes/<platform-slug>/catalog.csv
+```
+
+Build or rebuild the cache from one or more local CSV files or folders:
+
+```bash
+game-collection build-barcode-cache --source examples/barcode-catalog.example.csv
+```
+
+Limit output to specific platforms:
+
+```bash
+game-collection build-barcode-cache --source data/my-barcodes/ --platform "Nintendo Switch" --platform "PlayStation 5"
+```
+
+CSV columns are:
+
+```text
+barcode,title,platform,provider,provider_game_id,release_date,developer,publisher,description,cover_url
+```
+
+The scanner accepts valid GS1 GTIN-8, GTIN-12/UPC-A, GTIN-13/EAN/JAN, and GTIN-14 values. Platform hints rank common publisher/manufacturer prefixes first, such as Nintendo `045496`/`4902370`, PlayStation `711719`/`4948872`, and Xbox `885370`/`889842`, but exact importing still requires a cached barcode row.
 
 ### Backend validation with local sample photos
 
@@ -193,11 +230,11 @@ Then run:
 game-collection validate-samples
 ```
 
-The command runs the backend ingestion path without the web UI, using local cover indexes for each listed platform. It writes:
+The command runs the backend ingestion path without the web UI, using barcode scanning and local catalog matches. It writes:
 
 - `review/sample-validation/report.csv`: expected-title pass/fail rows,
-- `review/sample-validation/suggestions.csv`: every detected crop and suggested match,
-- `review/sample-validation/crops/`: generated crop images.
+- `review/sample-validation/suggestions.csv`: every barcode-derived suggestion,
+- `review/sample-validation/crops/`: retained compatibility output directory.
 
 Those files are ignored because they can reveal your real library. Commit only generic examples such as `examples/sample-expectations.example.json`.
 
@@ -208,7 +245,7 @@ After upload, the browser redirects to an ingest results page.
 Check:
 
 - suggested match count,
-- detected crop thumbnails,
+- uploaded photo thumbnails,
 - matched cover thumbnails,
 - matched title,
 - platform.
@@ -351,8 +388,8 @@ Available views:
 
 - `Library`: browse, search, and filter the full collection.
 - `Plan Next`: view owned games that are unplayed or currently being played.
-- `Upload Photos`: upload one or more source photos, trigger cover-art matching/import against cached platforms, and review uncertain rows.
-- `Cache Settings`: choose which IGDB platforms should have complete local cover-art indexes. Cached platforms appear first, followed by uncached platforms alphabetically.
+- `Upload Photos`: upload one or more back-cover photos, scan barcodes, and review barcode/manual rows.
+- `Cache Settings`: choose which IGDB platforms should have complete local metadata indexes for title autocomplete and cover art display. Cached platforms appear first, followed by uncached platforms alphabetically.
 - `Game Detail`: edit metadata, ownership state, location/condition notes, sale notes, and play status.
 
 Useful edits:
@@ -389,8 +426,8 @@ The default `.gitignore` excludes those local files and keeps only placeholders 
 
 The current recognition implementation is intentionally conservative:
 
-- it detects rectangular case regions,
-- crops each case,
-- compares each crop to indexed provider cover art using perceptual image hashes,
-- presents image-match suggestions,
+- it scans back-cover photos for retail barcodes,
+- it validates decoded values as GS1 GTIN-8/12/13/14 formats,
+- it looks up exact matches in local barcode caches,
+- it uses cached provider metadata only for title autocomplete and cover art display,
 - imports only manually accepted rows.

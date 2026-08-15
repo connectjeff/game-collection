@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from game_collection import db
+from game_collection.barcode_match import BarcodeCatalogEntry
 from game_collection.cover_match import CoverIndexEntry
 from game_collection.providers import GameMatch
 from game_collection.web import CollectionHandler, _fit_review_rows_to_expected_count
@@ -122,7 +123,8 @@ class WebIngestTests(unittest.TestCase):
 
         self.assertIn('name="platform" value="PlayStation 5" checked', body)
         self.assertIn('name="platform" value="PlayStation 4"', body)
-        self.assertIn("12 covers", body)
+        self.assertIn("12 metadata rows", body)
+        self.assertIn("Barcode Cache", body)
 
     def test_review_table_compares_uploaded_crop_to_matched_cover(self) -> None:
         with patch("game_collection.web.platform_cache_statuses") as statuses:
@@ -351,6 +353,7 @@ class WebIngestTests(unittest.TestCase):
                 crops_dir: Path,
                 platform: str | None = None,
                 cover_entries: list[CoverIndexEntry] | None = None,
+                barcode_entries=None,
                 accept_threshold: float = 0.92,
             ):
                 return [
@@ -424,6 +427,7 @@ class WebIngestTests(unittest.TestCase):
                 crops_dir: Path,
                 platform: str | None = None,
                 cover_entries: list[CoverIndexEntry] | None = None,
+                barcode_entries=None,
                 accept_threshold: float = 0.92,
             ):
                 return [
@@ -463,13 +467,81 @@ class WebIngestTests(unittest.TestCase):
                     html = response.read().decode("utf-8")
 
             self.assertIn("<strong>3</strong> suggested match", html)
-            self.assertIn("Expected titles: 3 | Detected boxes: 1", html)
+            self.assertIn("Expected titles: 3 | Detected barcodes: 1", html)
             self.assertIn('name="row_count" value="3"', html)
             self.assertIn('name="row_0_matched_title"', html)
             self.assertIn('name="row_1_matched_title"', html)
             self.assertIn('name="row_2_matched_title"', html)
             self.assertNotIn('name="row_3_matched_title"', html)
             self.assertIn("Expected title placeholder", html)
+
+    def test_upload_ingest_passes_barcode_catalog_to_detector(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "collection.sqlite3"
+            handler = type("TestCollectionHandler", (CollectionHandler,), {"db_path": db_path})
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+
+            cover_entries = [
+                CoverIndexEntry(
+                    provider="fake",
+                    provider_game_id="placeholder",
+                    title="Placeholder",
+                    platform="Nintendo GameCube",
+                    release_date=None,
+                    developer=None,
+                    publisher=None,
+                    description=None,
+                    cover_url=None,
+                    cover_path=root / "cover.jpg",
+                    phash="0",
+                )
+            ]
+            seen_catalog_sizes: list[int] = []
+
+            def fake_detect(
+                *,
+                photo_path: Path,
+                crops_dir: Path,
+                platform: str | None = None,
+                cover_entries: list[CoverIndexEntry] | None = None,
+                barcode_entries=None,
+                accept_threshold: float = 0.92,
+            ):
+                seen_catalog_sizes.append(len(barcode_entries or []))
+                return []
+
+            body, content_type = multipart_body()
+            url = f"http://127.0.0.1:{server.server_port}/ingest"
+            request = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": content_type})
+            with (
+                patch("game_collection.web.WEB_INGEST_ROOT", root / "web-ingests"),
+                patch(
+                    "game_collection.web.read_platform_barcode_cache",
+                    return_value=[
+                        BarcodeCatalogEntry(
+                            barcode="045496905651",
+                            title="Super Mario Galaxy + Super Mario Galaxy 2",
+                            platform="Nintendo Switch",
+                        )
+                    ],
+                ),
+                patch("game_collection.web.read_cover_index", return_value=cover_entries),
+                patch("game_collection.web.detect_photo_candidates", side_effect=fake_detect),
+                patch("game_collection.web.get_provider", return_value=FakeProvider()),
+                patch("game_collection.web.platform_cache_statuses") as statuses,
+            ):
+                statuses.return_value = [
+                    type("Status", (), {"name": "Nintendo GameCube", "cached": True, "count": 9})(),
+                ]
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    response.read()
+
+            self.assertEqual(seen_catalog_sizes, [1])
 
     def test_upload_ingest_handles_multiple_images_in_one_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -504,6 +576,7 @@ class WebIngestTests(unittest.TestCase):
                 crops_dir: Path,
                 platform: str | None = None,
                 cover_entries: list[CoverIndexEntry] | None = None,
+                barcode_entries=None,
                 accept_threshold: float = 0.92,
             ):
                 title = {

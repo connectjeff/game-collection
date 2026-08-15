@@ -6,8 +6,15 @@ from pathlib import Path
 
 from . import db
 from .automation import auto_import_review, import_accepted_rows
+from .barcode_match import (
+    BARCODE_CACHE_ROOT,
+    BARCODE_CATALOG_PATH,
+    build_barcode_cache,
+    read_barcode_catalog,
+    read_platform_barcode_cache,
+)
 from .config import load_dotenv
-from .cover_match import build_cover_index, default_index_path
+from .cover_match import default_index_path, read_cover_index
 from .photo_ingest import PhotoIngestError, image_paths, write_photo_candidates
 from .providers import GameMatch, ProviderError, get_provider
 from .review import match_to_row, read_review, write_intake_template, write_review
@@ -173,13 +180,11 @@ def cmd_ingest_photos(args: argparse.Namespace) -> int:
     if not photos:
         print(f"No image files found in {args.path}")
         return 0
-    provider = get_provider(args.provider)
-    cover_entries = build_cover_index(
-        provider=provider,
-        platform=args.platform,
-        index_path=args.cover_index,
-        limit=args.cover_index_limit,
-        refresh=args.refresh_cover_index,
+    cover_entries = read_cover_index(args.cover_index) if args.cover_index and args.cover_index.exists() else []
+    barcode_entries = (
+        read_barcode_catalog(args.barcode_catalog)
+        if args.barcode_catalog != BARCODE_CATALOG_PATH
+        else read_platform_barcode_cache(args.platform)
     )
     candidate_count = write_photo_candidates(
         photo_paths=photos,
@@ -187,6 +192,7 @@ def cmd_ingest_photos(args: argparse.Namespace) -> int:
         crops_dir=args.crops_dir,
         platform=args.platform,
         cover_entries=cover_entries,
+        barcode_entries=barcode_entries,
         accept_threshold=args.accept_threshold,
     )
     rows = read_review(args.candidates_out)
@@ -200,11 +206,23 @@ def cmd_ingest_photos(args: argparse.Namespace) -> int:
     )
     needs_review = sum(1 for row in rows if row.get("decision") != "accept")
     print(
-        f"Detected {candidate_count} candidates from {len(photos)} photo(s). "
-        f"Cover index entries={len(cover_entries)}. "
+        f"Detected {candidate_count} barcode candidate(s) from {len(photos)} photo(s). "
+        f"Barcode catalog entries={len(barcode_entries)}. "
         f"Imported {imported}; skipped_existing={skipped_existing}; "
         f"needs_review={needs_review}; candidates={args.candidates_out}; audit={args.audit_out}"
     )
+    return 0
+
+
+def cmd_build_barcode_cache(args: argparse.Namespace) -> int:
+    source_paths = args.source or [BARCODE_CATALOG_PATH]
+    results = build_barcode_cache(
+        source_paths=source_paths,
+        platforms=args.platform or None,
+        cache_root=args.cache_root,
+    )
+    for platform, count in results.items():
+        print(f"{platform}: {count} barcode(s)")
     return 0
 
 
@@ -347,14 +365,13 @@ def build_parser() -> argparse.ArgumentParser:
     auto_import.add_argument("--allow-duplicates", action="store_true")
     auto_import.set_defaults(func=cmd_auto_import_review)
 
-    ingest_photos = subparsers.add_parser("ingest-photos", help="Match uploaded cover photos to provider cover art")
+    ingest_photos = subparsers.add_parser("ingest-photos", help="Scan uploaded photos for barcodes")
     _add_db_arg(ingest_photos)
     ingest_photos.add_argument("path", type=Path, help="Image file or folder of image files")
     ingest_photos.add_argument("--provider", default="igdb", choices=PROVIDER_CHOICES)
     ingest_photos.add_argument("--platform")
-    ingest_photos.add_argument("--cover-index", type=Path, default=None)
-    ingest_photos.add_argument("--cover-index-limit", type=int, default=None, help="Optional debug limit; omitted builds the full index")
-    ingest_photos.add_argument("--refresh-cover-index", action="store_true")
+    ingest_photos.add_argument("--cover-index", type=Path, default=None, help="Optional existing metadata index used only for cover art/title enrichment")
+    ingest_photos.add_argument("--barcode-catalog", type=Path, default=BARCODE_CATALOG_PATH)
     ingest_photos.add_argument("--candidates-out", type=Path, default=Path("review/photo-candidates.csv"))
     ingest_photos.add_argument("--audit-out", type=Path, default=Path("review/photo-ingest.audit.csv"))
     ingest_photos.add_argument("--crops-dir", type=Path, default=Path("review/crops"))
@@ -363,6 +380,21 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_photos.add_argument("--played", default="unplayed", choices=["unplayed", "playing", "completed", "retired"])
     ingest_photos.add_argument("--allow-duplicates", action="store_true")
     ingest_photos.set_defaults(func=cmd_ingest_photos)
+
+    barcode_cache = subparsers.add_parser("build-barcode-cache", help="Build local platform barcode lookup caches from CSV sources")
+    barcode_cache.add_argument(
+        "--source",
+        type=Path,
+        action="append",
+        help="CSV file or folder containing barcode catalog CSVs; repeat for multiple sources",
+    )
+    barcode_cache.add_argument(
+        "--platform",
+        action="append",
+        help="Limit cache output to a platform name; repeat for multiple platforms",
+    )
+    barcode_cache.add_argument("--cache-root", type=Path, default=BARCODE_CACHE_ROOT)
+    barcode_cache.set_defaults(func=cmd_build_barcode_cache)
 
     mark = subparsers.add_parser("mark", help="Mark a collection item as owned/would_sell/sold/etc.")
     _add_db_arg(mark)
@@ -401,7 +433,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate_samples = subparsers.add_parser(
         "validate-samples",
-        help="Run backend cover-matching validation against local sample photo expectations",
+        help="Run backend barcode-ingest validation against local sample photo expectations",
     )
     validate_samples.add_argument(
         "--expectations",
@@ -419,7 +451,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--suggestions-out",
         type=Path,
         default=Path("review/sample-validation/suggestions.csv"),
-        help="CSV of every detected crop and suggested match",
+        help="CSV of every decoded barcode and suggested match",
     )
     validate_samples.add_argument(
         "--write-template",

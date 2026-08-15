@@ -38,7 +38,8 @@ class SampleValidationTests(unittest.TestCase):
                 ]
 
             with (
-                patch("game_collection.sample_validation.build_cover_index", return_value=[]),
+                patch("game_collection.sample_validation.read_cover_index", return_value=[]),
+                patch("game_collection.sample_validation.read_platform_barcode_cache", return_value=[]),
                 patch("game_collection.sample_validation.detect_photo_candidates", side_effect=fake_detect),
             ):
                 result = validate_sample_photos(

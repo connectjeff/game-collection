@@ -17,15 +17,15 @@ Core requirements:
 
 ```mermaid
 flowchart LR
-    A["Floor photo"] --> B["Case detection"]
-    B --> C["Crop each case"]
-    C --> D["Cover-art image hash"]
-    K["Provider cover index"] --> F["Image similarity ranking"]
-    D --> F
-    F --> G{"Confidence >= threshold?"}
-    G -->|yes| H["SQLite import"]
-    G -->|no| I["Audit CSV review queue"]
-    H --> J["Planning and collection views"]
+    A["Back-cover photo"] --> B["Barcode scan"]
+    B --> C["Local platform barcode cache"]
+    C --> D{"Exact code match?"}
+    D -->|yes| E["Review row with matched title"]
+    D -->|no| F["Manual review row"]
+    G["Cached provider metadata"] --> E
+    E --> H["Accepted rows import to SQLite"]
+    F --> H
+    H --> I["Planning and collection views"]
 ```
 
 ## Data Model
@@ -67,13 +67,14 @@ Add later:
 
 The photo recognizer should be optimized for accuracy over magic:
 
-1. Ask the user to photograph cases in a grid with minimal overlap.
-2. Detect rectangular case boundaries using OpenCV contours.
-3. Save numbered crops.
-4. Compute an image hash for each crop.
-5. Compare the crop hash to an indexed set of provider cover-art hashes.
-6. Auto-accept only high-confidence matches.
-7. Send ambiguous results to CSV review.
+1. Ask the user to photograph the backs of cases so barcodes are visible.
+2. Decode UPC/EAN barcodes from uploaded photos.
+3. Validate decoded values as GS1 GTIN-8/12/13/14 codes.
+4. Use the platform hint to prioritize expected publisher/manufacturer prefixes.
+5. Match decoded codes against the local platform barcode cache.
+6. Enrich matched titles from cached provider metadata when available.
+7. Add unmatched or missing expected titles as manual review rows.
+8. Import only rows explicitly accepted in review.
 
 ## Automated Ingest
 
@@ -93,13 +94,13 @@ The primary command is:
 game-collection ingest-photos photos/incoming/ --provider igdb --platform "PlayStation 5"
 ```
 
-It builds or reuses an IGDB cover-art index for the selected platform, then writes:
+It scans photos for barcodes, then writes:
 
-- `review/photo-candidates.csv` for detected cover candidates,
+- `review/photo-candidates.csv` for barcode-derived candidates,
 - `review/photo-ingest.audit.csv` for match/import decisions,
-- `review/crops/` for detected case crops.
+- `review/crops/` as a compatibility output directory.
 
-High-confidence rows are imported automatically. Low-confidence rows stay in the audit CSV for later cleanup.
+Rows are not imported automatically from photo upload. Accepted rows are imported after browser review.
 
 Prioritized platform indexes:
 
@@ -108,6 +109,21 @@ Prioritized platform indexes:
 - `Xbox One`
 - `Xbox Series X|S`
 
-The web server starts prebuilding those four cover indexes in the background by default and caches the full IGDB platform list for the upload picklist. Matching should use local cached cover hashes during upload, not build platform indexes on demand.
+The web server starts prebuilding those four metadata indexes in the background by default and caches the full IGDB platform list for the upload picklist. Barcode matching uses local CSV caches under `review/barcodes/`; cached provider metadata is used for autocomplete and cover art display.
 
-The `Cache Settings` web view lists all cached IGDB platforms first, then all uncached IGDB platforms alphabetically. Submitting checked platforms builds local cover-art indexes for them.
+Barcode caches are built from CSV sources:
+
+```bash
+game-collection build-barcode-cache --source examples/barcode-catalog.example.csv
+```
+
+The scanner anticipates standard retail game packaging codes:
+
+- GTIN-12 / UPC-A for North American releases.
+- GTIN-13 / EAN/JAN for international and Japanese releases.
+- GTIN-8 / UPC-E for compact labels.
+- GTIN-14 as a fallback for data sources that store zero-padded GTINs.
+
+Platform hints do not make a match by themselves. They validate and rank decoded codes using common prefixes such as Nintendo `045496`/`4902370`, PlayStation `711719`/`4948872`, and Xbox `885370`/`889842`; import identity still requires an exact cached barcode row.
+
+The `Cache Settings` web view lists all cached IGDB platforms first, then all uncached IGDB platforms alphabetically. Submitting checked platforms builds local metadata indexes for them.

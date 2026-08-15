@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .cover_match import build_cover_index, default_index_path
+from .barcode_match import read_platform_barcode_cache
+from .cover_match import default_index_path, read_cover_index
 from .photo_ingest import detect_photo_candidates
 from .providers import MetadataProvider
 
@@ -125,18 +126,14 @@ def validate_sample_photos(
     found_count = 0
 
     for expectation in expectations:
-        cover_entries = build_cover_index(
-            provider=provider,
-            platform=expectation.platform,
-            index_path=default_index_path(provider.name, expectation.platform),
-            limit=cover_index_limit,
-            refresh=refresh_cover_index,
-        )
+        cover_entries = read_cover_index(default_index_path(provider.name, expectation.platform))
+        barcode_entries = read_platform_barcode_cache(expectation.platform)
         rows = detect_photo_candidates(
             photo_path=expectation.photo,
             crops_dir=crops_dir / expectation.photo.stem,
             platform=expectation.platform,
             cover_entries=cover_entries,
+            barcode_entries=barcode_entries,
             accept_threshold=accept_threshold,
         )
         rows_by_photo[expectation.photo] = rows

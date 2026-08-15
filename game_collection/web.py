@@ -18,6 +18,7 @@ from typing import Any
 
 from . import db
 from .automation import import_accepted_rows
+from .barcode_match import barcode_cache_statuses, read_platform_barcode_cache
 from .cover_match import (
     CoverIndexEntry,
     PRIORITIZED_PLATFORMS,
@@ -1270,26 +1271,30 @@ class CollectionHandler(BaseHTTPRequestHandler):
     def _cache_settings(self, message: str | None = None, *, error: bool = False) -> str:
         notice = f'<div class="notice{" error" if error else ""}">{_h(message)}</div>' if message else ""
         statuses = platform_cache_statuses("igdb", self.platform_options)
+        barcode_statuses = barcode_cache_statuses(self.platform_options)
         rows = []
         for status in statuses:
             checked = " checked" if status.cached else ""
-            cached_text = f"{status.count} covers" if status.cached else "not cached"
+            metadata_text = f"{status.count} metadata rows" if status.cached else "not cached"
+            barcode_count = barcode_statuses.get(status.name, 0)
+            barcode_text = f"{barcode_count} barcode rows" if barcode_count else "no barcode cache"
             rows.append(
                 f"""
 <tr>
   <td><input type="checkbox" name="platform" value="{_h(status.name)}"{checked}></td>
   <td>{_h(status.name)}</td>
-  <td><span class="badge{' sold' if not status.cached else ''}">{_h(cached_text)}</span></td>
+  <td><span class="badge{' sold' if not status.cached else ''}">{_h(metadata_text)}</span></td>
+  <td><span class="badge{' sold' if not barcode_count else ''}">{_h(barcode_text)}</span></td>
 </tr>"""
             )
         return f"""
 <h1>Cache Settings</h1>
 {notice}
 <section class="panel">
-  <p class="muted">Choose platforms to build local cover-art image indexes for. Cached platforms are listed first; uncached platforms are alphabetical.</p>
+  <p class="muted">Choose platforms to build local metadata indexes for title autocomplete and cover art display. Barcode caches are built from local CSV sources with the CLI. Cached platforms are listed first; uncached platforms are alphabetical.</p>
   <form method="post" action="/caches">
     <table>
-      <thead><tr><th></th><th>Platform</th><th>Status</th></tr></thead>
+      <thead><tr><th></th><th>Platform</th><th>Metadata Cache</th><th>Barcode Cache</th></tr></thead>
       <tbody>{''.join(rows)}</tbody>
     </table>
     <div class="actions"><button type="submit">Build Selected Indexes</button></div>
@@ -1402,14 +1407,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 self._send_html("Upload Photos", self._ingest_form("Choose a cached platform.", error=True))
                 return
             cover_entries = read_cover_index(default_index_path(provider_name, platform))
-            if not cover_entries:
-                self._send_html(
-                    "Upload Photos",
-                    self._ingest_form(f"Build the cover index for {platform} before uploading photos.", error=True),
-                    HTTPStatus.BAD_REQUEST,
-                )
-                return
-
+            barcode_entries = read_platform_barcode_cache(platform)
             rows: list[dict[str, str]] = []
             for index, file_info in enumerate(image_files, start=1):
                 suffix = Path(file_info["filename"]).suffix.lower() or ".jpg"
@@ -1421,6 +1419,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
                         crops_dir=crops_dir,
                         platform=platform,
                         cover_entries=cover_entries,
+                        barcode_entries=barcode_entries,
                         accept_threshold=2.0,
                     )
                 )
@@ -1444,9 +1443,10 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 "played": played,
                 "uploaded": str(len(image_files)),
                 "expected_titles": str(expected_titles),
-                "detected_candidates": str(detected_count),
+                "detected_barcodes": str(detected_count),
                 "candidates": str(len(rows)),
                 "cover_index_entries": str(len(cover_entries)),
+                "barcode_catalog_entries": str(len(barcode_entries)),
                 "imported": "0",
                 "skipped_existing": "0",
             }
@@ -1484,8 +1484,8 @@ class CollectionHandler(BaseHTTPRequestHandler):
 <div class="ingest-summary-grid">
   <section class="panel">
     <p><strong>{len(rows)}</strong> suggested match(es), <strong>{accepted}</strong> marked for import, <strong>{needs_review}</strong> awaiting review.</p>
-    <p class="muted">Expected titles: {_h(summary.get('expected_titles') or len(rows))} | Detected boxes: {_h(summary.get('detected_candidates') or len(rows))}</p>
-    <p class="muted">Compared detected covers against {_h(summary.get('cover_index_entries', '0'))} indexed cover images.</p>
+    <p class="muted">Expected titles: {_h(summary.get('expected_titles') or len(rows))} | Detected barcodes: {_h(summary.get('detected_barcodes') or summary.get('detected_candidates') or len(rows))}</p>
+    <p class="muted">Barcode catalog entries: {_h(summary.get('barcode_catalog_entries', '0'))}. Cover art is shown from cached database metadata when a barcode/title match has one.</p>
     <p class="muted">Provider: {_h(summary.get('provider'))} | Platform hint: {_h(summary.get('platform')) or 'none'}</p>
   </section>
   {uploaded_photos}

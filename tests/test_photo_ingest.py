@@ -1,27 +1,60 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from game_collection.photo_ingest import DEFAULT_SHAPE_HINT, _cover_shape_hint
+from game_collection.barcode_match import BarcodeCatalogEntry
+from game_collection.photo_ingest import detect_photo_candidates
 
 
-class PhotoIngestShapeHintTests(unittest.TestCase):
-    def test_prioritized_platforms_use_blu_ray_case_shape(self) -> None:
-        for platform in ["PlayStation 5", "PlayStation 4", "Xbox One", "Xbox Series X|S"]:
-            hint = _cover_shape_hint(platform)
+class PhotoIngestBarcodeTests(unittest.TestCase):
+    def test_detect_photo_candidates_uses_only_barcode_catalog_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            photo = Path(tmp) / "back.jpg"
+            photo.write_bytes(b"fake")
 
-            self.assertAlmostEqual(hint.target_aspect, 1.27)
-            self.assertLess(hint.max_aspect, DEFAULT_SHAPE_HINT.max_aspect)
-            self.assertLess(hint.max_area_ratio, DEFAULT_SHAPE_HINT.max_area_ratio)
+            with patch("game_collection.photo_ingest.detect_barcodes", return_value=["045496905651"]):
+                rows = detect_photo_candidates(
+                    photo_path=photo,
+                    crops_dir=Path(tmp) / "crops",
+                    platform="Nintendo Switch",
+                    barcode_entries=[
+                        BarcodeCatalogEntry(
+                            barcode="045496905651",
+                            title="Super Mario Galaxy + Super Mario Galaxy 2",
+                            platform="Nintendo Switch",
+                        )
+                    ],
+                    cover_entries=[],
+                )
 
-    def test_unknown_platform_uses_broad_shape_hint(self) -> None:
-        self.assertEqual(_cover_shape_hint("Nintendo GameCube"), DEFAULT_SHAPE_HINT)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["matched_title"], "Super Mario Galaxy + Super Mario Galaxy 2")
+        self.assertEqual(rows[0]["provider"], "barcode")
+        self.assertEqual(rows[0]["provider_game_id"], "045496905651")
+        self.assertEqual(rows[0]["confidence"], "1.00")
+        self.assertIn("exact barcode catalog match", rows[0]["notes"])
 
-    def test_explicit_min_area_override_is_preserved(self) -> None:
-        hint = _cover_shape_hint("PlayStation 5", min_area_ratio=0.05)
+    def test_detect_photo_candidates_keeps_unmatched_barcode_for_manual_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            photo = Path(tmp) / "back.jpg"
+            photo.write_bytes(b"fake")
 
-        self.assertEqual(hint.min_area_ratio, 0.05)
-        self.assertAlmostEqual(hint.target_aspect, 1.27)
+            with patch("game_collection.photo_ingest.detect_barcodes", return_value=["999999999999"]):
+                rows = detect_photo_candidates(
+                    photo_path=photo,
+                    crops_dir=Path(tmp) / "crops",
+                    platform="Nintendo Switch",
+                    barcode_entries=[],
+                    cover_entries=[],
+                )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["matched_title"], "")
+        self.assertEqual(rows[0]["provider_game_id"], "")
+        self.assertIn("no barcode catalog match", rows[0]["notes"])
 
 
 if __name__ == "__main__":
