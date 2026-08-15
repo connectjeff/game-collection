@@ -216,6 +216,28 @@ PriceCharting-style exports are supported when you have access to a CSV download
 game-collection build-barcode-cache --source data/pricecharting.csv --source-provider pricecharting
 ```
 
+No-subscription public connectors are available for sources that expose a public API or download endpoint:
+
+```bash
+# Open-data export from Wikidata video game records that have GTINs.
+game-collection download-barcode-source wikidata-video-games --out review/barcode-sources/wikidata-video-games.csv
+
+# Public product search from upc.dev.
+game-collection download-barcode-source upcdev-search --query "Nintendo Switch game" --out review/barcode-sources/upcdev-switch.csv
+
+# Public lookup of known barcodes from upc.dev.
+game-collection download-barcode-source upcdev-product --barcode 045496905651 --out review/barcode-sources/upcdev-known.csv
+
+# Public lookup of known barcodes from Open Products Facts.
+game-collection download-barcode-source open-products-facts --barcode 045496905651 --out review/barcode-sources/open-products-facts-known.csv
+```
+
+Then build the cache from those downloaded CSVs:
+
+```bash
+game-collection build-barcode-cache --source review/barcode-sources/
+```
+
 CSV columns are:
 
 ```text
@@ -228,9 +250,12 @@ The scanner accepts valid GS1 GTIN-8, GTIN-12/UPC-A, GTIN-13/EAN/JAN, and GTIN-1
 
 Known source constraints:
 
+- Wikidata can be queried without an API key and its structured data is CC0, but it only contains barcode rows that contributors have added. The connector intentionally uses a direct `instance of video game` query so the public SPARQL service does not time out; subclass edge cases may need CSV import or manual rows.
 - PriceCharting exposes UPC lookup and paid CSV downloads that can seed broad multi-platform caches.
 - MobyGames has a game API, but product identifiers are not part of the hobbyist tier; use only if your subscription allows product-code export.
-- UPCDatabase and upc.dev can look up known barcodes, but they are not practical bulk discovery sources by themselves.
+- upc.dev can perform no-key product lookup/search for basic data, but search is not a complete video-game platform export.
+- Open Products Facts can perform no-key barcode lookup for non-food products, but coverage of video games is expected to be sparse.
+- UPCDatabase has an API but requires account/API-token setup.
 - LaunchBox has useful local metadata exports, but no official public Games Database API for this use case.
 - Do not scrape websites into the public project unless their terms explicitly allow it.
 

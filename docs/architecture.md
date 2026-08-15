@@ -119,6 +119,15 @@ game-collection build-barcode-cache --source examples/barcode-catalog.example.cs
 
 The builder accepts local CSV files, folders of CSV files, and CSV URLs. It recognizes the project schema plus common export column names such as `upc`, `ean`, `gtin`, `product-name`, and `console-name`, so a broad source export can populate caches for every platform present in that export.
 
+No-subscription source connectors normalize public data into the same CSV schema:
+
+- `wikidata-video-games`: SPARQL query for video game items with GTIN values.
+- `upcdev-search`: public text search against upc.dev.
+- `upcdev-product`: public lookup for known GTIN values through upc.dev.
+- `open-products-facts`: public lookup for known GTIN values through Open Products Facts.
+
+These connectors do not guarantee complete coverage. They are cache seeders for sources that expose data without paid access; exact ingest still depends on the barcode being present in the local cache.
+
 The scanner anticipates standard retail game packaging codes:
 
 - GTIN-12 / UPC-A for North American releases.
