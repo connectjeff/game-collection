@@ -94,6 +94,82 @@ class WebIngestTests(unittest.TestCase):
         self.assertEqual(padded[2]["decision"], "review")
         self.assertEqual(trimmed, [{"matched_title": "One"}])
 
+    def test_library_browser_renders_swipe_shelves_and_metadata_filters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "collection.sqlite3"
+            db.init_db(db_path)
+            with db.connect(db_path) as conn:
+                metroid = db.upsert_game(
+                    conn,
+                    provider="igdb",
+                    provider_game_id="metroid-prime",
+                    title="Metroid Prime",
+                    platform="Nintendo GameCube",
+                    release_date="2002-11-17",
+                    developer="Retro Studios",
+                    publisher="Nintendo",
+                    cover_url="https://example.test/metroid.jpg",
+                )
+                halo = db.upsert_game(
+                    conn,
+                    provider="igdb",
+                    provider_game_id="halo-infinite",
+                    title="Halo Infinite",
+                    platform="Xbox Series X|S",
+                    release_date="2021-12-08",
+                    developer="343 Industries",
+                    publisher="Xbox Game Studios",
+                )
+                db.add_collection_item(conn, game_id=metroid, acquisition_status="owned")
+                db.add_playthrough(conn, game_id=metroid, play_status="completed")
+                db.add_collection_item(conn, game_id=halo, acquisition_status="would_sell")
+                db.add_playthrough(conn, game_id=halo, play_status="playing")
+
+            handler = type("TestCollectionHandler", (CollectionHandler,), {"db_path": db_path})
+            body = handler._collection(handler, "")
+
+        self.assertIn("library-shell", body)
+        self.assertIn("Continue Playing", body)
+        self.assertIn("Completed Archive", body)
+        self.assertIn("Nintendo GameCube", body)
+        self.assertIn("Xbox Game Studios", body)
+        self.assertIn("2000s Releases", body)
+        self.assertIn("2020s Releases", body)
+        self.assertIn("https://example.test/metroid.jpg", body)
+
+    def test_library_browser_filters_by_platform_and_publisher(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "collection.sqlite3"
+            db.init_db(db_path)
+            with db.connect(db_path) as conn:
+                nintendo_game = db.upsert_game(
+                    conn,
+                    provider="igdb",
+                    provider_game_id="mario",
+                    title="Mario",
+                    platform="Nintendo Switch",
+                    publisher="Nintendo",
+                )
+                xbox_game = db.upsert_game(
+                    conn,
+                    provider="igdb",
+                    provider_game_id="halo",
+                    title="Halo",
+                    platform="Xbox Series X|S",
+                    publisher="Xbox Game Studios",
+                )
+                db.add_collection_item(conn, game_id=nintendo_game)
+                db.add_collection_item(conn, game_id=xbox_game)
+
+            handler = type("TestCollectionHandler", (CollectionHandler,), {"db_path": db_path})
+            query = urllib.parse.urlencode({"platform": "Nintendo Switch", "publisher": "Nintendo"})
+            body = handler._collection(handler, query)
+
+        self.assertIn("Mario", body)
+        self.assertNotIn("Halo</div>", body)
+        self.assertIn("Nintendo Switch", body)
+        self.assertIn("filter-chip active", body)
+
     def test_upload_form_includes_only_cached_platforms(self) -> None:
         with patch("game_collection.web.platform_cache_statuses") as statuses:
             statuses.return_value = [

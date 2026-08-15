@@ -240,6 +240,66 @@ def _matched_cover_path(row: dict[str, str]) -> str:
     return notes.split(marker, 1)[1].split(";", 1)[0].strip()
 
 
+def _row_value(row: Any, key: str, default: str = "") -> str:
+    try:
+        value = row[key]
+    except (KeyError, IndexError, TypeError):
+        value = row.get(key, default) if isinstance(row, dict) else default
+    return default if value is None else str(value)
+
+
+def _release_year(row: Any) -> int | None:
+    release_date = _row_value(row, "release_date")
+    if len(release_date) >= 4 and release_date[:4].isdigit():
+        return int(release_date[:4])
+    return None
+
+
+def _release_era(row: Any) -> str:
+    year = _release_year(row)
+    if year is None:
+        return "Unknown era"
+    return f"{(year // 10) * 10}s"
+
+
+def _top_values(rows: list[Any], key: str, *, limit: int = 8) -> list[str]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = _row_value(row, key).strip()
+        if value:
+            counts[value] = counts.get(value, 0) + 1
+    return [
+        value
+        for value, _count in sorted(counts.items(), key=lambda item: (-item[1], item[0].casefold()))[:limit]
+    ]
+
+
+def _top_eras(rows: list[Any], *, limit: int = 8) -> list[str]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        era = _release_era(row)
+        if era != "Unknown era":
+            counts[era] = counts.get(era, 0) + 1
+    return [era for era, _count in sorted(counts.items(), key=lambda item: item[0], reverse=True)[:limit]]
+
+
+def _filter_url(**updates: str) -> str:
+    params = {key: value for key, value in updates.items() if value}
+    query = urllib.parse.urlencode(params)
+    return f"/?{query}" if query else "/"
+
+
+def _chip(label: str, *, active: bool = False, **params: str) -> str:
+    return (
+        f'<a class="filter-chip{" active" if active else ""}" '
+        f'href="{_h(_filter_url(**params))}">{_h(label)}</a>'
+    )
+
+
+def _handler_type(handler: Any) -> Any:
+    return handler if isinstance(handler, type) else type(handler)
+
+
 def _layout(title: str, body: str) -> bytes:
     page = f"""<!doctype html>
 <html lang="en">
@@ -339,6 +399,197 @@ def _layout(title: str, body: str) -> bytes:
     th {{ color: var(--muted); font-size: 12px; text-transform: uppercase; }}
     tr:last-child td {{ border-bottom: 0; }}
     .title-link {{ color: var(--accent); font-weight: 700; text-decoration: none; }}
+    .library-shell {{
+      margin: -24px;
+      min-height: calc(100vh - 53px);
+      padding: 22px 0 38px;
+      background:
+        radial-gradient(circle at 18% 0%, rgba(12, 107, 88, 0.24), transparent 34%),
+        linear-gradient(180deg, #111820 0%, #172029 42%, #f6f7f9 100%);
+      color: #f8fafc;
+      overflow: hidden;
+    }}
+    .library-hero {{
+      padding: 8px 24px 12px;
+      max-width: 1180px;
+      margin: 0 auto;
+    }}
+    .library-kicker {{
+      color: #9bd6c9;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }}
+    .library-title {{
+      margin: 0;
+      font-size: 30px;
+      line-height: 1.08;
+    }}
+    .library-subtitle {{
+      max-width: 760px;
+      margin: 8px 0 18px;
+      color: #c8d3dd;
+    }}
+    .library-filters {{
+      display: grid;
+      gap: 12px;
+      margin-top: 14px;
+    }}
+    .library-search {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      max-width: 680px;
+    }}
+    .library-search input {{
+      min-height: 44px;
+      border-color: rgba(255, 255, 255, 0.18);
+      background: rgba(255, 255, 255, 0.09);
+      color: #fff;
+    }}
+    .library-search input::placeholder {{ color: #aebac5; }}
+    .filter-row {{
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding: 2px 24px 8px 0;
+      scroll-snap-type: x proximity;
+      -webkit-overflow-scrolling: touch;
+    }}
+    .filter-chip {{
+      flex: 0 0 auto;
+      scroll-snap-align: start;
+      display: inline-flex;
+      align-items: center;
+      min-height: 36px;
+      padding: 7px 12px;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      color: #eff6f4;
+      font-size: 13px;
+      font-weight: 800;
+      text-decoration: none;
+      white-space: nowrap;
+    }}
+    .filter-chip.active {{
+      background: #f8fafc;
+      color: #152029;
+      border-color: #f8fafc;
+    }}
+    .library-summary {{
+      padding: 0 24px;
+      max-width: 1180px;
+      margin: 0 auto 8px;
+      color: #d4dde5;
+      font-weight: 700;
+    }}
+    .shelf {{
+      margin: 18px 0 0;
+    }}
+    .shelf-header {{
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 0 24px;
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: baseline;
+    }}
+    .shelf h2 {{
+      margin: 0;
+      color: #f8fafc;
+      font-size: 19px;
+    }}
+    .shelf-note {{
+      color: #b8c5cf;
+      font-size: 13px;
+      font-weight: 700;
+    }}
+    .shelf-row {{
+      display: grid;
+      grid-auto-flow: column;
+      grid-auto-columns: 154px;
+      gap: 12px;
+      overflow-x: auto;
+      padding: 12px max(24px, calc((100vw - 1180px) / 2 + 24px)) 18px;
+      scroll-snap-type: x mandatory;
+      scroll-padding-left: 24px;
+      -webkit-overflow-scrolling: touch;
+    }}
+    .game-card {{
+      scroll-snap-align: start;
+      color: #f8fafc;
+      text-decoration: none;
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }}
+    .poster {{
+      width: 100%;
+      aspect-ratio: 3 / 4;
+      border-radius: 7px;
+      overflow: hidden;
+      background: #26313b;
+      box-shadow: 0 12px 26px rgba(0, 0, 0, 0.28);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      transition: transform 150ms ease, box-shadow 150ms ease;
+    }}
+    .game-card:hover .poster, .game-card:focus .poster {{
+      transform: translateY(-3px);
+      box-shadow: 0 18px 34px rgba(0, 0, 0, 0.34);
+    }}
+    .poster img {{
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: cover;
+    }}
+    .poster-fallback {{
+      width: 100%;
+      height: 100%;
+      display: grid;
+      place-items: center;
+      padding: 12px;
+      color: #c8d3dd;
+      text-align: center;
+      font-weight: 800;
+      background: linear-gradient(145deg, #25313d, #3b4450);
+    }}
+    .game-card-title {{
+      color: #f8fafc;
+      font-size: 13px;
+      font-weight: 800;
+      line-height: 1.22;
+      min-height: 32px;
+      overflow-wrap: anywhere;
+    }}
+    .game-card-meta {{
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      color: #b9c5cf;
+      font-size: 11px;
+      font-weight: 700;
+    }}
+    .mini-pill {{
+      display: inline-flex;
+      max-width: 100%;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.1);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .library-empty {{
+      max-width: 1180px;
+      margin: 18px auto;
+      padding: 18px 24px;
+      color: #d4dde5;
+    }}
     .badge {{
       display: inline-flex;
       align-items: center;
@@ -584,6 +835,23 @@ def _layout(title: str, body: str) -> bytes:
     }}
     @media (max-width: 760px) {{
       header, main {{ padding-left: 14px; padding-right: 14px; }}
+      .library-shell {{
+        margin-left: -14px;
+        margin-right: -14px;
+        margin-top: -24px;
+      }}
+      .library-hero {{ padding-left: 16px; padding-right: 16px; }}
+      .library-title {{ font-size: 25px; }}
+      .library-search {{ grid-template-columns: 1fr; }}
+      .filter-row {{ padding-right: 16px; }}
+      .library-summary {{ padding-left: 16px; padding-right: 16px; }}
+      .shelf-header {{ padding-left: 16px; padding-right: 16px; }}
+      .shelf-row {{
+        grid-auto-columns: 132px;
+        gap: 10px;
+        padding-left: 16px;
+        padding-right: 16px;
+      }}
       form.filters, .detail, .grid, .ingest-summary-grid, .manual-review-form {{ grid-template-columns: 1fr; }}
       table, thead, tbody, tr, th, td {{ display: block; }}
       thead {{ display: none; }}
@@ -1241,48 +1509,188 @@ class CollectionHandler(BaseHTTPRequestHandler):
 
     def _collection(self, query: str) -> str:
         params = urllib.parse.parse_qs(query)
-        q = (params.get("q") or [""])[0].strip().casefold()
+        q_raw = (params.get("q") or [""])[0].strip()
+        q = q_raw.casefold()
         owning = (params.get("owning") or [""])[0]
         played = (params.get("played") or [""])[0]
+        platform_filter = (params.get("platform") or [""])[0]
+        publisher_filter = (params.get("publisher") or [""])[0]
+        era_filter = (params.get("era") or [""])[0]
         conn = db.connect(self.db_path)
         try:
-            rows = list(db.list_collection(conn))
+            rows = [dict(row) for row in db.list_collection(conn)]
         finally:
             conn.close()
         filtered = []
         for row in rows:
-            text = f"{row['title']} {row['platform'] or ''}".casefold()
+            text = " ".join(
+                [
+                    _row_value(row, "title"),
+                    _row_value(row, "platform"),
+                    _row_value(row, "publisher"),
+                    _row_value(row, "developer"),
+                ]
+            ).casefold()
             if q and q not in text:
                 continue
-            if owning and row["acquisition_status"] != owning:
+            if owning and _row_value(row, "acquisition_status") != owning:
                 continue
-            if played and row["latest_play_status"] != played:
+            if played and _row_value(row, "latest_play_status") != played:
+                continue
+            if platform_filter and _row_value(row, "platform") != platform_filter:
+                continue
+            if publisher_filter and _row_value(row, "publisher") != publisher_filter:
+                continue
+            if era_filter and _release_era(row) != era_filter:
                 continue
             filtered.append(row)
+        filtered.sort(key=lambda row: _row_value(row, "title").casefold())
+        active_params = {
+            "q": q_raw,
+            "owning": owning,
+            "played": played,
+            "platform": platform_filter,
+            "publisher": publisher_filter,
+            "era": era_filter,
+        }
+        platform_chips = [
+            _chip(platform, active=platform == platform_filter, **{**active_params, "platform": platform})
+            for platform in _top_values(rows, "platform", limit=10)
+        ]
+        publisher_chips = [
+            _chip(publisher, active=publisher == publisher_filter, **{**active_params, "publisher": publisher})
+            for publisher in _top_values(rows, "publisher", limit=8)
+        ]
+        era_chips = [
+            _chip(era, active=era == era_filter, **{**active_params, "era": era})
+            for era in _top_eras(rows, limit=8)
+        ]
+        ownership_chips = [
+            _chip("All", active=not owning, **{**active_params, "owning": ""}),
+            *[
+                _chip(status.replace("_", " ").title(), active=owning == status, **{**active_params, "owning": status})
+                for status in OWNERSHIP_STATUSES
+            ],
+        ]
+        play_chips = [
+            _chip("Any Play Status", active=not played, **{**active_params, "played": ""}),
+            *[
+                _chip(status.title(), active=played == status, **{**active_params, "played": status})
+                for status in PLAY_STATUSES
+            ],
+        ]
         body = f"""
-<h1>Library</h1>
-<form class="filters" method="get" action="/">
-  <label>Search
-    <input name="q" value="{_h(q)}" placeholder="Title or platform">
-  </label>
-  <label>Ownership
-    <select name="owning">
-      <option value="">Any</option>
-      {''.join(f'<option value="{status}"{_selected(owning, status)}>{status}</option>' for status in OWNERSHIP_STATUSES)}
-    </select>
-  </label>
-  <label>Play status
-    <select name="played">
-      <option value="">Any</option>
-      {''.join(f'<option value="{status}"{_selected(played, status)}>{status}</option>' for status in PLAY_STATUSES)}
-    </select>
-  </label>
-  <button type="submit">Filter</button>
-</form>
-<p class="muted">{len(filtered)} shown from {len(rows)} collection items.</p>
-{self._rows_table(filtered)}
+<div class="library-shell">
+  <section class="library-hero">
+    <div class="library-kicker">Physical Library</div>
+    <h1 class="library-title">Browse your games by what to play, keep, finish, or sell.</h1>
+    <p class="library-subtitle">Swipe shelves by platform, publisher, release era, ownership, and play status. Cover art remains a visual verification aid; barcode data remains the inventory source.</p>
+    <form class="library-search" method="get" action="/">
+      <input name="q" value="{_h(q_raw)}" placeholder="Search title, platform, publisher, or developer">
+      <button type="submit">Search</button>
+      <input type="hidden" name="owning" value="{_h(owning)}">
+      <input type="hidden" name="played" value="{_h(played)}">
+      <input type="hidden" name="platform" value="{_h(platform_filter)}">
+      <input type="hidden" name="publisher" value="{_h(publisher_filter)}">
+      <input type="hidden" name="era" value="{_h(era_filter)}">
+    </form>
+    <div class="library-filters">
+      <div class="filter-row">{''.join(ownership_chips)}</div>
+      <div class="filter-row">{''.join(play_chips)}</div>
+      <div class="filter-row">{_chip("All Platforms", active=not platform_filter, **{**active_params, "platform": ""})}{''.join(platform_chips)}</div>
+      <div class="filter-row">{_chip("All Publishers", active=not publisher_filter, **{**active_params, "publisher": ""})}{''.join(publisher_chips)}</div>
+      <div class="filter-row">{_chip("All Eras", active=not era_filter, **{**active_params, "era": ""})}{''.join(era_chips)}</div>
+    </div>
+  </section>
+  <p class="library-summary">{len(filtered)} shown from {len(rows)} collection item(s).</p>
+  {_handler_type(self)._library_shelves(self, filtered)}
+</div>
 """
         return body
+
+    def _library_shelves(self, rows: list[dict[str, Any]]) -> str:
+        if not rows:
+            return '<div class="library-empty">No games match this view.</div>'
+
+        shelves: list[str] = []
+        playing = [row for row in rows if _row_value(row, "latest_play_status") == "playing"]
+        if playing:
+            shelves.append(_handler_type(self)._game_shelf(self, "Continue Playing", playing, "Games already in progress."))
+
+        up_next = [
+            row
+            for row in rows
+            if _row_value(row, "acquisition_status") in {"owned", "would_sell"}
+            and _row_value(row, "latest_play_status") in {"unplayed", "playing"}
+        ]
+        if up_next:
+            shelves.append(_handler_type(self)._game_shelf(self, "Up Next", up_next[:24], "Owned games that are not completed."))
+
+        recent = sorted(rows, key=lambda row: _row_value(row, "collection_created_at"), reverse=True)[:24]
+        shelves.append(_handler_type(self)._game_shelf(self, "Recently Added", recent, "Newest physical copies in the library."))
+
+        sell_candidates = [row for row in rows if _row_value(row, "acquisition_status") == "would_sell"]
+        if sell_candidates:
+            shelves.append(_handler_type(self)._game_shelf(self, "Considering Selling", sell_candidates, "Marked as possible sale candidates."))
+
+        completed = [row for row in rows if _row_value(row, "latest_play_status") == "completed"]
+        if completed:
+            shelves.append(_handler_type(self)._game_shelf(self, "Completed Archive", completed[:24], "Finished games remain visible even after sale."))
+
+        for platform in _top_values(rows, "platform", limit=5):
+            platform_rows = [row for row in rows if _row_value(row, "platform") == platform]
+            shelves.append(_handler_type(self)._game_shelf(self, platform, platform_rows[:24], "Grouped by platform metadata."))
+
+        for publisher in _top_values(rows, "publisher", limit=4):
+            publisher_rows = [row for row in rows if _row_value(row, "publisher") == publisher]
+            if len(publisher_rows) >= 2:
+                shelves.append(_handler_type(self)._game_shelf(self, f"{publisher} Shelf", publisher_rows[:24], "Publisher metadata from IGDB or imported sources."))
+
+        for era in _top_eras(rows, limit=4):
+            era_rows = [row for row in rows if _release_era(row) == era]
+            if era_rows:
+                shelves.append(_handler_type(self)._game_shelf(self, f"{era} Releases", era_rows[:24], "Grouped by release year."))
+
+        return "".join(shelves)
+
+    def _game_shelf(self, title: str, rows: list[dict[str, Any]], note: str) -> str:
+        cards = "".join(_handler_type(self)._game_card(self, row) for row in rows)
+        return f"""
+<section class="shelf">
+  <div class="shelf-header">
+    <h2>{_h(title)}</h2>
+    <span class="shelf-note">{_h(note)}</span>
+  </div>
+  <div class="shelf-row">{cards}</div>
+</section>"""
+
+    def _game_card(self, row: dict[str, Any]) -> str:
+        cover_url = _row_value(row, "cover_url")
+        title = _row_value(row, "title")
+        platform = _row_value(row, "platform")
+        publisher = _row_value(row, "publisher")
+        status = _row_value(row, "latest_play_status")
+        owning = _row_value(row, "acquisition_status")
+        year = _release_year(row)
+        poster = (
+            f'<img src="{_h(cover_url)}" alt="Cover art for {_h(title)}" loading="lazy">'
+            if cover_url
+            else f'<div class="poster-fallback">{_h(title)}</div>'
+        )
+        meta_parts = [
+            platform,
+            str(year) if year else "",
+            publisher,
+            status.title() if status else "",
+            owning.replace("_", " ").title() if owning else "",
+        ]
+        meta = "".join(f'<span class="mini-pill">{_h(part)}</span>' for part in meta_parts if part)
+        return f"""
+<a class="game-card" href="/games/{_h(_row_value(row, 'game_id'))}" aria-label="{_h(title)}">
+  <div class="poster">{poster}</div>
+  <div class="game-card-title">{_h(title)}</div>
+  <div class="game-card-meta">{meta}</div>
+</a>"""
 
     def _plan(self) -> str:
         conn = db.connect(self.db_path)

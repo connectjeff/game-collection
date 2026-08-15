@@ -75,7 +75,13 @@ SELECT
     g.platform,
     g.provider,
     g.provider_game_id,
+    g.release_date,
+    g.developer,
+    g.publisher,
+    g.description,
     ci.acquisition_status,
+    ci.created_at AS collection_created_at,
+    ci.updated_at AS collection_updated_at,
     MAX(p.created_at) AS latest_play_record_at,
     COALESCE(
         (
@@ -214,7 +220,11 @@ def mark_status(conn: sqlite3.Connection, *, collection_item_id: int, status: st
 def list_collection(conn: sqlite3.Connection) -> Iterable[sqlite3.Row]:
     return conn.execute(
         """
-        SELECT collection_item_id, game_id, title, platform, acquisition_status, latest_play_status, provider, provider_game_id
+        SELECT
+            collection_item_id, game_id, title, platform, acquisition_status,
+            latest_play_status, provider, provider_game_id, release_date,
+            developer, publisher, description, cover_url, collection_created_at,
+            collection_updated_at
         FROM collection_summary
         ORDER BY title COLLATE NOCASE, platform COLLATE NOCASE
         """
