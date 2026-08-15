@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .barcode_match import read_platform_barcode_cache
-from .cover_match import default_index_path, read_cover_index
+from .cover_cache import default_index_path, read_cover_index
 from .photo_ingest import detect_photo_candidates
 from .providers import MetadataProvider
 

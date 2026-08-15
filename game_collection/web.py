@@ -19,7 +19,7 @@ from typing import Any
 from . import db
 from .automation import import_accepted_rows
 from .barcode_match import barcode_cache_statuses, read_platform_barcode_cache
-from .cover_match import (
+from .cover_cache import (
     CoverIndexEntry,
     PRIORITIZED_PLATFORMS,
     build_cover_index,

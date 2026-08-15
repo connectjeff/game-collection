@@ -7,8 +7,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image
-
 from .providers import GameMatch, IgdbProvider, MetadataProvider, ProviderError
 
 
@@ -23,7 +21,6 @@ INDEX_FIELDS = [
     "description",
     "cover_url",
     "cover_path",
-    "phash",
 ]
 
 PRIORITIZED_PLATFORMS = ["PlayStation 5", "PlayStation 4", "Xbox One", "Xbox Series X|S"]
@@ -43,14 +40,6 @@ class CoverIndexEntry:
     description: str | None
     cover_url: str | None
     cover_path: Path
-    phash: str
-
-
-@dataclass(frozen=True)
-class CoverMatch:
-    entry: CoverIndexEntry
-    distance: int
-    confidence: float
 
 
 @dataclass(frozen=True)
@@ -63,32 +52,6 @@ class PlatformCacheStatus:
 def slugify(value: str | None) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9]+", "-", value or "all").strip("-").lower()
     return cleaned or "all"
-
-
-def phash_image(image: Image.Image) -> str:
-    import cv2  # type: ignore[import-not-found]
-    import numpy as np
-
-    gray = image.convert("L").resize((32, 32), Image.Resampling.LANCZOS)
-    pixels = np.asarray(gray, dtype=np.float32)
-    dct = cv2.dct(pixels)
-    low = dct[:8, :8].flatten()
-    median = np.median(low[1:])
-    bits = ["1" if value > median else "0" for value in low]
-    return f"{int(''.join(bits), 2):016x}"
-
-
-def phash_path(path: Path) -> str:
-    with Image.open(path) as image:
-        return phash_image(image)
-
-
-def hamming(left: str, right: str) -> int:
-    return (int(left, 16) ^ int(right, 16)).bit_count()
-
-
-def confidence_from_distance(distance: int) -> float:
-    return max(0.0, min(1.0, 1.0 - (distance / 64.0)))
 
 
 def read_cover_index(path: Path) -> list[CoverIndexEntry]:
@@ -108,7 +71,6 @@ def read_cover_index(path: Path) -> list[CoverIndexEntry]:
                 description=row.get("description") or None,
                 cover_url=row.get("cover_url") or None,
                 cover_path=Path(row["cover_path"]),
-                phash=row["phash"],
             )
             for row in rows
         ]
@@ -132,7 +94,6 @@ def write_cover_index(path: Path, entries: list[CoverIndexEntry]) -> None:
                     "description": entry.description or "",
                     "cover_url": entry.cover_url or "",
                     "cover_path": str(entry.cover_path),
-                    "phash": entry.phash,
                 }
             )
 
@@ -248,10 +209,6 @@ def build_cover_index(
         cover_path = covers_dir / f"{match.provider_game_id}.jpg"
         if not cover_path.exists() and not download_cover(match.cover_url, cover_path):
             return None
-        try:
-            phash = phash_path(cover_path)
-        except OSError:
-            return None
         return CoverIndexEntry(
             provider=match.provider,
             provider_game_id=match.provider_game_id,
@@ -263,39 +220,9 @@ def build_cover_index(
             description=match.description,
             cover_url=match.cover_url,
             cover_path=cover_path,
-            phash=phash,
         )
 
     with ThreadPoolExecutor(max_workers=8) as executor:
         entries = [entry for entry in executor.map(index_match, matches) if entry is not None]
     write_cover_index(index_path, entries)
     return entries
-
-
-def match_cover(crop_path: Path, entries: list[CoverIndexEntry]) -> CoverMatch | None:
-    if not entries:
-        return None
-    crop_hash = phash_path(crop_path)
-    best_entry = min(entries, key=lambda entry: hamming(crop_hash, entry.phash))
-    distance = hamming(crop_hash, best_entry.phash)
-    return CoverMatch(entry=best_entry, distance=distance, confidence=confidence_from_distance(distance))
-
-
-def match_to_game_match(match: CoverMatch) -> GameMatch:
-    entry = match.entry
-    return GameMatch(
-        provider=entry.provider,
-        provider_game_id=entry.provider_game_id,
-        title=entry.title,
-        platform=entry.platform,
-        release_date=entry.release_date,
-        developer=entry.developer,
-        publisher=entry.publisher,
-        description=entry.description,
-        cover_url=entry.cover_url,
-        confidence=match.confidence,
-        raw={
-            "cover_match_distance": match.distance,
-            "cover_index_path": str(entry.cover_path),
-        },
-    )

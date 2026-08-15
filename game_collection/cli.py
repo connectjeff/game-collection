@@ -22,7 +22,7 @@ from .barcode_sources import (
     read_barcodes_file,
 )
 from .config import load_dotenv
-from .cover_match import default_index_path, read_cover_index
+from .cover_cache import default_index_path, read_cover_index
 from .photo_ingest import PhotoIngestError, image_paths, write_photo_candidates
 from .providers import GameMatch, ProviderError, get_provider
 from .review import match_to_row, read_review, write_intake_template, write_review

@@ -84,7 +84,6 @@ Photo ingest depends on the image-processing stack installed by the base project
 dependencies = [
     "numpy",
     "opencv-python",
-    "pillow",
 ]
 ```
 

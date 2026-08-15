@@ -17,7 +17,7 @@ from game_collection.barcode_match import (
     read_barcode_catalog,
     write_barcode_catalog,
 )
-from game_collection.cover_match import CoverIndexEntry
+from game_collection.cover_cache import CoverIndexEntry
 
 
 ATTACHED_BARCODE_PHOTO = Path(
@@ -93,7 +93,6 @@ class BarcodeMatchTests(unittest.TestCase):
                 description=None,
                 cover_url="https://example.test/cover.jpg",
                 cover_path=Path("cover.jpg"),
-                phash="0",
             )
         ]
 

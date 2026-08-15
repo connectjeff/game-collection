@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from game_collection import db
 from game_collection.barcode_match import BarcodeCatalogEntry
-from game_collection.cover_match import CoverIndexEntry
+from game_collection.cover_cache import CoverIndexEntry
 from game_collection.providers import GameMatch
 from game_collection.web import CollectionHandler, _fit_review_rows_to_expected_count
 
@@ -126,7 +126,7 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn("12 metadata rows", body)
         self.assertIn("Barcode Cache", body)
 
-    def test_review_table_compares_uploaded_crop_to_matched_cover(self) -> None:
+    def test_review_table_shows_uploaded_image_and_cached_cover(self) -> None:
         with patch("game_collection.web.platform_cache_statuses") as statuses:
             statuses.return_value = [
                 type("Status", (), {"name": "Nintendo GameCube", "cached": True, "count": 12})(),
@@ -146,7 +146,7 @@ class WebIngestTests(unittest.TestCase):
                         "matched_title": "Metroid Prime",
                         "confidence": "0.98",
                         "decision": "review",
-                        "notes": "cover_match_distance=1; cover_path=review/cover-indexes/igdb/gamecube/covers/123.jpg",
+                        "notes": "cover_path=review/cover-indexes/igdb/gamecube/covers/123.jpg",
                     }
                 ],
             )
@@ -288,9 +288,9 @@ class WebIngestTests(unittest.TestCase):
             index_path.write_text(
                 "\n".join(
                     [
-                        "provider,provider_game_id,title,platform,release_date,developer,publisher,description,cover_url,cover_path,phash",
-                        f"igdb,123,Metroid Prime,Nintendo GameCube,2002-11-17,Retro Studios,Nintendo,,https://example.test/cover.jpg,{covers_dir / '123.jpg'},abc",
-                        f"igdb,456,Final Fantasy VII Remake,Nintendo GameCube,2020-04-10,Square Enix,Square Enix,,https://example.test/ff7.jpg,{covers_dir / '456.jpg'},def",
+                        "provider,provider_game_id,title,platform,release_date,developer,publisher,description,cover_url,cover_path",
+                        f"igdb,123,Metroid Prime,Nintendo GameCube,2002-11-17,Retro Studios,Nintendo,,https://example.test/cover.jpg,{covers_dir / '123.jpg'}",
+                        f"igdb,456,Final Fantasy VII Remake,Nintendo GameCube,2020-04-10,Square Enix,Square Enix,,https://example.test/ff7.jpg,{covers_dir / '456.jpg'}",
                     ]
                 ),
                 encoding="utf-8",
@@ -343,7 +343,6 @@ class WebIngestTests(unittest.TestCase):
                     description=None,
                     cover_url=None,
                     cover_path=root / "cover.jpg",
-                    phash="0",
                 )
             ]
 
@@ -372,7 +371,7 @@ class WebIngestTests(unittest.TestCase):
                         "cover_url": "",
                         "confidence": "0.98",
                         "decision": "accept",
-                        "notes": "cover_match_distance=1",
+                        "notes": "barcode=045496905651; exact barcode catalog match",
                     }
                 ]
 
@@ -417,7 +416,6 @@ class WebIngestTests(unittest.TestCase):
                     description=None,
                     cover_url=None,
                     cover_path=root / "cover.jpg",
-                    phash="0",
                 )
             ]
 
@@ -446,7 +444,7 @@ class WebIngestTests(unittest.TestCase):
                         "cover_url": "",
                         "confidence": "0.98",
                         "decision": "review",
-                        "notes": "cover_match_distance=1",
+                        "notes": "barcode=045496905651; exact barcode catalog match",
                     }
                 ]
 
@@ -498,7 +496,6 @@ class WebIngestTests(unittest.TestCase):
                     description=None,
                     cover_url=None,
                     cover_path=root / "cover.jpg",
-                    phash="0",
                 )
             ]
             seen_catalog_sizes: list[int] = []
@@ -566,7 +563,6 @@ class WebIngestTests(unittest.TestCase):
                     description=None,
                     cover_url=None,
                     cover_path=root / "cover.jpg",
-                    phash="0",
                 )
             ]
 
@@ -600,7 +596,7 @@ class WebIngestTests(unittest.TestCase):
                         "cover_url": "",
                         "confidence": "0.98",
                         "decision": "accept",
-                        "notes": "cover_match_distance=1",
+                        "notes": "barcode=045496905651; exact barcode catalog match",
                     }
                 ]
 

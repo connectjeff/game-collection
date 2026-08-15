@@ -33,7 +33,7 @@ class SampleValidationTests(unittest.TestCase):
                         "confidence": "0.97",
                         "crop_path": str(root / "crop.jpg"),
                         "provider_game_id": "123",
-                        "notes": "cover_match_distance=2",
+                        "notes": "barcode=045496905651; exact barcode catalog match",
                     }
                 ]
 

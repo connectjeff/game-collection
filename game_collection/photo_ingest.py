@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .barcode_match import BarcodeCatalogEntry, detect_barcodes, match_barcode
-from .cover_match import CoverIndexEntry
+from .cover_cache import CoverIndexEntry
 from .review import match_to_row
 from .review import write_review
 

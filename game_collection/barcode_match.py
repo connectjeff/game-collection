@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from .cover_match import CoverIndexEntry, slugify
+from .cover_cache import CoverIndexEntry, slugify
 from .providers import GameMatch
 
 
