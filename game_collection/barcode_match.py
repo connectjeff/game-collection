@@ -441,7 +441,12 @@ def match_barcode(
         description=entry.description or (indexed.description if indexed else None),
         cover_url=cover_url,
         confidence=1.0,
-        raw={"barcode": normalize_barcode(barcode), "match_type": "barcode"},
+        raw={
+            "barcode": normalize_barcode(barcode),
+            "match_type": "barcode",
+            "source_provider": entry.provider or "local-barcode-cache",
+            "source_id": entry.provider_game_id or entry.barcode,
+        },
     )
 
 

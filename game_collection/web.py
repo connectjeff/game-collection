@@ -18,7 +18,15 @@ from typing import Any
 
 from . import db
 from .automation import import_accepted_rows
-from .barcode_match import barcode_cache_statuses, read_platform_barcode_cache
+from .barcode_match import BARCODE_CACHE_ROOT, barcode_cache_statuses, build_barcode_cache, read_platform_barcode_cache
+from .barcode_sources import (
+    BarcodeSourceError,
+    download_csv_url,
+    download_open_products_facts_products,
+    download_upcdev_products,
+    download_upcdev_search,
+    download_wikidata_video_game_barcodes,
+)
 from .cover_cache import (
     CoverIndexEntry,
     PRIORITIZED_PLATFORMS,
@@ -40,6 +48,7 @@ PROVIDER_CHOICES = ["igdb"]
 EXPECTED_TITLE_COUNTS = list(range(1, 31))
 PLATFORM_PRESETS = PRIORITIZED_PLATFORMS
 WEB_INGEST_ROOT = Path("review/web-ingests")
+BARCODE_SOURCE_ROOT = Path("review/barcode-sources")
 AUTOCOMPLETE_LIMIT = 25
 
 
@@ -53,11 +62,14 @@ def _selected(left: str | None, right: str) -> str:
 
 def _blank_review_row(*, platform: str | None, play_status: str | None, note: str) -> dict[str, str]:
     return {
-        "photo_path": "",
-        "crop_path": "",
+        "upload_path": "",
+        "sample_image_path": "",
         "candidate_title": "",
         "platform": platform or "",
         "play_status": play_status or "unplayed",
+        "barcode": "",
+        "source_provider": "",
+        "source_id": "",
         "provider": "",
         "provider_game_id": "",
         "matched_title": "",
@@ -635,6 +647,9 @@ def _layout(title: str, body: str) -> bytes:
       setField(row, "description", match.description);
       setField(row, "cover_url", match.cover_url);
       setField(row, "confidence", match.confidence);
+      setField(row, "barcode", match.barcode);
+      setField(row, "source_provider", match.source_provider);
+      setField(row, "source_id", match.source_id);
       setField(row, "notes", match.notes);
       setMatchedCover(row, match.cover_path);
     }}
@@ -654,7 +669,7 @@ def _layout(title: str, body: str) -> bytes:
     }}
 
     function hiddenReviewMetadata(row, data) {{
-      const fields = ["provider", "provider_game_id", "candidate_title", "release_date", "developer", "publisher", "description", "cover_url", "confidence", "notes"];
+      const fields = ["provider", "provider_game_id", "candidate_title", "release_date", "developer", "publisher", "description", "cover_url", "confidence", "notes", "barcode", "source_provider", "source_id"];
       return fields.map((field) =>
         `<input type="hidden" name="row_${{row}}_${{field}}" value="${{escapeHtml(data[field] || "")}}">`
       ).join("");
@@ -674,8 +689,8 @@ def _layout(title: str, body: str) -> bytes:
         <span class="cover-label">Matched</span>
       </div>
     </div>
-    <input type="hidden" name="row_${{row}}_photo_path" value="">
-    <input type="hidden" name="row_${{row}}_crop_path" value="">
+    <input type="hidden" name="row_${{row}}_upload_path" value="">
+    <input type="hidden" name="row_${{row}}_sample_image_path" value="">
   </td>
   <td><select name="row_${{row}}_platform" data-row="${{row}}" data-role="row-platform-select">${{platformOptions(data.platform || "")}}</select></td>
   <td><select name="row_${{row}}_play_status">${{playStatusOptions(data.play_status || "unplayed")}}</select></td>
@@ -912,6 +927,9 @@ def _layout(title: str, body: str) -> bytes:
         cover_url: match.cover_url,
         confidence: match.confidence,
         notes: match.notes,
+        barcode: "",
+        source_provider: "manual",
+        source_id: match.provider_game_id,
         cover_path: match.cover_path
       }};
       const target = document.querySelector("[data-role='review-rows']");
@@ -1113,6 +1131,9 @@ class CollectionHandler(BaseHTTPRequestHandler):
         if parsed.path == "/caches":
             self._handle_cache_settings()
             return
+        if parsed.path == "/barcode-sources":
+            self._handle_barcode_source_download()
+            return
         if parsed.path.startswith("/ingest/") and parsed.path.endswith("/review"):
             run_id = parsed.path.split("/")[2]
             self._handle_ingest_review(run_id)
@@ -1210,6 +1231,9 @@ class CollectionHandler(BaseHTTPRequestHandler):
                     "cover_url": entry.cover_url or "",
                     "cover_path": str(entry.cover_path),
                     "confidence": "",
+                    "source_provider": "manual",
+                    "source_id": entry.provider_game_id,
+                    "barcode": "",
                     "notes": json.dumps({"manual_match": True, "cover_index_path": str(entry.cover_path)}, ensure_ascii=True),
                 }
             )
@@ -1300,6 +1324,40 @@ class CollectionHandler(BaseHTTPRequestHandler):
     <div class="actions"><button type="submit">Build Selected Indexes</button></div>
   </form>
 </section>
+<section class="panel">
+  <h2>Barcode Sources</h2>
+  <p class="muted">Download public barcode source data into ignored local CSVs, then rebuild barcode caches from all downloaded source files.</p>
+  <form method="post" action="/barcode-sources">
+    <div class="grid">
+      <label>Source
+        <select name="source">
+          <option value="wikidata-video-games">Wikidata Video Games</option>
+          <option value="upcdev-search">upc.dev Search</option>
+          <option value="upcdev-product">upc.dev Barcode Lookup</option>
+          <option value="open-products-facts">Open Products Facts Barcode Lookup</option>
+          <option value="csv-url">CSV URL</option>
+        </select>
+      </label>
+      <label>Query
+        <input name="query" placeholder="Required for upc.dev search">
+      </label>
+      <label>Barcodes
+        <input name="barcodes" placeholder="Comma or newline separated">
+      </label>
+      <label>CSV URL
+        <input name="url" placeholder="https://example.com/barcodes.csv">
+      </label>
+      <label>Limit
+        <input name="limit" type="number" min="1" placeholder="Optional">
+      </label>
+      <label>Offset
+        <input name="offset" type="number" min="0" placeholder="Optional">
+      </label>
+    </div>
+    <label><input type="checkbox" name="incremental" value="1" checked> Merge with existing source CSV</label>
+    <div class="actions"><button type="submit">Download Source And Rebuild Barcode Caches</button></div>
+  </form>
+</section>
 """
 
     def _handle_cache_settings(self) -> None:
@@ -1322,6 +1380,55 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 built.append(f"{platform}: {len(entries)} covers")
             self._send_html("Cache Settings", self._cache_settings("Built indexes for " + "; ".join(built)))
         except (ProviderError, ValueError) as exc:
+            self._send_html("Cache Settings", self._cache_settings(str(exc), error=True), HTTPStatus.BAD_REQUEST)
+
+    def _handle_barcode_source_download(self) -> None:
+        form = self._form()
+        source = form.get("source") or ""
+        source_path = BARCODE_SOURCE_ROOT / f"{source}.csv"
+        incremental = form.get("incremental") == "1"
+        limit = int(form["limit"]) if form.get("limit") else None
+        offset = int(form["offset"]) if form.get("offset") else None
+        barcodes = [
+            item.strip()
+            for item in re.split(r"[\s,]+", form.get("barcodes", ""))
+            if item.strip()
+        ]
+        try:
+            if source == "wikidata-video-games":
+                entries = download_wikidata_video_game_barcodes(
+                    source_path,
+                    limit=limit,
+                    offset=offset,
+                    incremental=incremental,
+                )
+            elif source == "upcdev-search":
+                query = form.get("query", "").strip()
+                if not query:
+                    raise BarcodeSourceError("Query is required for upc.dev search.")
+                entries = download_upcdev_search(source_path, query=query, incremental=incremental)
+            elif source == "upcdev-product":
+                if not barcodes:
+                    raise BarcodeSourceError("At least one barcode is required for upc.dev lookup.")
+                entries = download_upcdev_products(source_path, barcodes=barcodes, incremental=incremental)
+            elif source == "open-products-facts":
+                if not barcodes:
+                    raise BarcodeSourceError("At least one barcode is required for Open Products Facts lookup.")
+                entries = download_open_products_facts_products(source_path, barcodes=barcodes, incremental=incremental)
+            elif source == "csv-url":
+                url = form.get("url", "").strip()
+                if not url:
+                    raise BarcodeSourceError("CSV URL is required.")
+                entries = download_csv_url(source_path, url=url, incremental=incremental)
+            else:
+                raise BarcodeSourceError("Choose a supported barcode source.")
+            results = build_barcode_cache(source_paths=[BARCODE_SOURCE_ROOT], cache_root=BARCODE_CACHE_ROOT)
+            cache_summary = "; ".join(f"{platform}: {count}" for platform, count in results.items())
+            self._send_html(
+                "Cache Settings",
+                self._cache_settings(f"Downloaded {len(entries)} source row(s) from {source}; rebuilt barcode caches: {cache_summary}"),
+            )
+        except (BarcodeSourceError, ValueError, OSError) as exc:
             self._send_html("Cache Settings", self._cache_settings(str(exc), error=True), HTTPStatus.BAD_REQUEST)
 
     def _ingest_form(self, message: str | None = None, *, error: bool = False) -> str:
@@ -1559,10 +1666,11 @@ class CollectionHandler(BaseHTTPRequestHandler):
         )
 
         for index, row in enumerate(rows):
-            crop = row.get("crop_path")
+            upload = row.get("upload_path") or row.get("photo_path") or ""
+            sample_image = row.get("sample_image_path") or row.get("crop_path") or upload
             decision = row.get("decision") if row.get("decision") in grouped_rows else "review"
             matched_cover = _matched_cover_path(row)
-            crop_html = _cover_thumb(crop, "Uploaded", "Detected crop from uploaded photo", opens_modal=True)
+            sample_html = _cover_thumb(sample_image, "Uploaded", "Uploaded source image", opens_modal=True)
             matched_cover_html = _cover_thumb(
                 matched_cover,
                 "Matched",
@@ -1570,7 +1678,13 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 row_index=index,
                 role="matched-cover-sample",
             )
-            cover_pair_html = f'<div class="cover-pair">{crop_html}{matched_cover_html}</div>'
+            cover_pair_html = f'<div class="cover-pair">{sample_html}{matched_cover_html}</div>'
+            source_bits = [
+                row.get("source_provider") or "",
+                row.get("source_id") or "",
+                row.get("barcode") or "",
+            ]
+            source_text = " | ".join(bit for bit in source_bits if bit) or "manual"
             hidden_metadata = "".join(
                 f'<input type="hidden" name="row_{index}_{field}" value="{_h(row.get(field))}">'
                 for field in (
@@ -1584,6 +1698,9 @@ class CollectionHandler(BaseHTTPRequestHandler):
                     "cover_url",
                     "confidence",
                     "notes",
+                    "barcode",
+                    "source_provider",
+                    "source_id",
                 )
             )
             if decision == "review":
@@ -1607,9 +1724,10 @@ class CollectionHandler(BaseHTTPRequestHandler):
             grouped_rows[decision].append(
                 f"""
 <tr data-row="{index}" data-decision="{_h(decision)}">
-  <td>{cover_pair_html}<input type="hidden" name="row_{index}_photo_path" value="{_h(row.get('photo_path'))}"><input type="hidden" name="row_{index}_crop_path" value="{_h(crop)}"></td>
+  <td>{cover_pair_html}<input type="hidden" name="row_{index}_upload_path" value="{_h(upload)}"><input type="hidden" name="row_{index}_sample_image_path" value="{_h(sample_image)}"></td>
   <td>{platform_select(index, row.get('platform'))}</td>
   <td>{play_status_select(index, row.get('play_status'))}</td>
+  <td><span class="muted">{_h(source_text)}</span></td>
   <td>
     <div class="match-control">
       <textarea class="title-field" name="row_{index}_matched_title" rows="2" data-row="{index}" data-role="match-title-input" autocomplete="off">{_h(row.get('matched_title'))}</textarea>
@@ -1629,7 +1747,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
   <h2>{_h(title)} <span class="badge" data-role="{decision}-count">{len(grouped_rows[decision])}</span></h2>
   <div class="empty-state" data-role="{decision}-empty"{empty_hidden}>{_h(empty_text)}</div>
   <table class="review-table">
-    <thead><tr><th>Covers</th><th>Platform</th><th>Play Status</th><th>Matched Title</th><th>Action</th><th></th></tr></thead>
+    <thead><tr><th>Covers</th><th>Platform</th><th>Play Status</th><th>Source</th><th>Matched Title</th><th>Action</th><th></th></tr></thead>
     <tbody data-role="{decision}-rows">{body_rows}</tbody>
   </table>
 </section>"""

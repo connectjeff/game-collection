@@ -16,6 +16,7 @@ from .barcode_match import (
 from .barcode_sources import (
     BarcodeSourceError,
     download_open_products_facts_products,
+    download_csv_url,
     download_upcdev_products,
     download_upcdev_search,
     download_wikidata_video_game_barcodes,
@@ -244,21 +245,30 @@ def _barcode_args(args: argparse.Namespace) -> list[str]:
 
 def cmd_download_barcode_source(args: argparse.Namespace) -> int:
     if args.source == "wikidata-video-games":
-        entries = download_wikidata_video_game_barcodes(args.out, limit=args.limit)
+        entries = download_wikidata_video_game_barcodes(
+            args.out,
+            limit=args.limit,
+            offset=args.offset,
+            incremental=args.incremental,
+        )
     elif args.source == "upcdev-search":
         if not args.query:
             raise BarcodeSourceError("--query is required for upcdev-search")
-        entries = download_upcdev_search(args.out, query=args.query)
+        entries = download_upcdev_search(args.out, query=args.query, incremental=args.incremental)
     elif args.source == "upcdev-product":
         barcodes = _barcode_args(args)
         if not barcodes:
             raise BarcodeSourceError("--barcode or --barcode-file is required for upcdev-product")
-        entries = download_upcdev_products(args.out, barcodes=barcodes)
+        entries = download_upcdev_products(args.out, barcodes=barcodes, incremental=args.incremental)
     elif args.source == "open-products-facts":
         barcodes = _barcode_args(args)
         if not barcodes:
             raise BarcodeSourceError("--barcode or --barcode-file is required for open-products-facts")
-        entries = download_open_products_facts_products(args.out, barcodes=barcodes)
+        entries = download_open_products_facts_products(args.out, barcodes=barcodes, incremental=args.incremental)
+    elif args.source == "csv-url":
+        if not args.url:
+            raise BarcodeSourceError("--url is required for csv-url")
+        entries = download_csv_url(args.out, url=args.url, incremental=args.incremental)
     else:
         raise BarcodeSourceError(f"Unknown barcode source: {args.source}")
     print(f"Wrote {len(entries)} barcode row(s) to {args.out}")
@@ -441,13 +451,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     barcode_download.add_argument(
         "source",
-        choices=["wikidata-video-games", "upcdev-search", "upcdev-product", "open-products-facts"],
+        choices=["wikidata-video-games", "upcdev-search", "upcdev-product", "open-products-facts", "csv-url"],
     )
     barcode_download.add_argument("--out", type=Path, required=True)
     barcode_download.add_argument("--query", help="Search query for sources that support text search")
+    barcode_download.add_argument("--url", help="CSV URL for csv-url source")
     barcode_download.add_argument("--barcode", action="append", help="Barcode to look up; repeat for multiple barcodes")
     barcode_download.add_argument("--barcode-file", type=Path, help="Text file with one barcode per line")
     barcode_download.add_argument("--limit", type=int, help="Optional result limit for bulk sources")
+    barcode_download.add_argument("--offset", type=int, help="Optional source offset for incremental bulk downloads")
+    barcode_download.add_argument("--incremental", action="store_true", help="Merge downloaded rows with the existing output CSV")
     barcode_download.set_defaults(func=cmd_download_barcode_source)
 
     mark = subparsers.add_parser("mark", help="Mark a collection item as owned/would_sell/sold/etc.")

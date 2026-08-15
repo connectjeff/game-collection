@@ -55,10 +55,10 @@ def detect_photo_candidates(
         )
         row = _blank_candidate_row(
             photo_path=photo_path,
-            crop_path=None,
             platform=platform,
             notes=f"barcode={barcode}; no barcode catalog match",
         )
+        row["barcode"] = barcode
         if barcode_match:
             row["candidate_title"] = barcode_match.title
             row = match_to_row(row, barcode_match, accept_threshold=accept_threshold)
@@ -72,16 +72,18 @@ def detect_photo_candidates(
 def _blank_candidate_row(
     *,
     photo_path: Path,
-    crop_path: Path | None,
     platform: str | None,
     notes: str,
 ) -> dict[str, str]:
     return {
-        "photo_path": str(photo_path),
-        "crop_path": str(crop_path or ""),
+        "upload_path": str(photo_path),
+        "sample_image_path": str(photo_path),
         "candidate_title": "",
         "platform": platform or "",
         "play_status": "",
+        "barcode": "",
+        "source_provider": "",
+        "source_id": "",
         "provider": "",
         "provider_game_id": "",
         "matched_title": "",

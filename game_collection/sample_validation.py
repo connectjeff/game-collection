@@ -19,7 +19,7 @@ REPORT_FIELDS = [
     "found",
     "matched_title",
     "confidence",
-    "crop_path",
+    "sample_image_path",
     "provider_game_id",
     "notes",
 ]
@@ -27,7 +27,10 @@ REPORT_FIELDS = [
 SUGGESTION_FIELDS = [
     "photo",
     "platform",
-    "crop_path",
+    "sample_image_path",
+    "barcode",
+    "source_provider",
+    "source_id",
     "matched_title",
     "confidence",
     "decision",
@@ -142,7 +145,10 @@ def validate_sample_photos(
                 {
                     "photo": str(expectation.photo),
                     "platform": expectation.platform,
-                    "crop_path": row.get("crop_path", ""),
+                    "sample_image_path": row.get("sample_image_path", ""),
+                    "barcode": row.get("barcode", ""),
+                    "source_provider": row.get("source_provider", ""),
+                    "source_id": row.get("source_id", ""),
                     "matched_title": row.get("matched_title", ""),
                     "confidence": row.get("confidence", ""),
                     "decision": row.get("decision", ""),
@@ -164,7 +170,7 @@ def validate_sample_photos(
                     "found": "yes" if found_row else "no",
                     "matched_title": (found_row or {}).get("matched_title", ""),
                     "confidence": (found_row or {}).get("confidence", ""),
-                    "crop_path": (found_row or {}).get("crop_path", ""),
+                    "sample_image_path": (found_row or {}).get("sample_image_path", ""),
                     "provider_game_id": (found_row or {}).get("provider_game_id", ""),
                     "notes": (found_row or {}).get("notes", ""),
                 }

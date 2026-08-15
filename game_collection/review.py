@@ -8,11 +8,14 @@ from .providers import GameMatch
 
 
 INTAKE_FIELDS = [
-    "photo_path",
-    "crop_path",
+    "upload_path",
+    "sample_image_path",
     "candidate_title",
     "platform",
     "play_status",
+    "barcode",
+    "source_provider",
+    "source_id",
     "provider",
     "provider_game_id",
     "matched_title",
@@ -26,6 +29,11 @@ INTAKE_FIELDS = [
     "notes",
 ]
 
+LEGACY_FIELD_ALIASES = {
+    "upload_path": "photo_path",
+    "sample_image_path": "crop_path",
+}
+
 
 def write_intake_template(photo_path: Path, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -34,11 +42,14 @@ def write_intake_template(photo_path: Path, out_path: Path) -> None:
         writer.writeheader()
         writer.writerow(
             {
-                "photo_path": str(photo_path),
-                "crop_path": "",
+                "upload_path": str(photo_path),
+                "sample_image_path": "",
                 "candidate_title": "",
                 "platform": "",
                 "play_status": "unplayed",
+                "barcode": "",
+                "source_provider": "",
+                "source_id": "",
                 "provider": "",
                 "provider_game_id": "",
                 "matched_title": "",
@@ -56,7 +67,12 @@ def write_intake_template(photo_path: Path, out_path: Path) -> None:
 
 def read_review(path: Path) -> list[dict[str, str]]:
     with path.open("r", newline="", encoding="utf-8") as handle:
-        return list(csv.DictReader(handle))
+        rows = list(csv.DictReader(handle))
+    for row in rows:
+        for field, legacy_field in LEGACY_FIELD_ALIASES.items():
+            if not row.get(field) and row.get(legacy_field):
+                row[field] = row[legacy_field]
+    return rows
 
 
 def write_review(path: Path, rows: list[dict[str, str]]) -> None:
@@ -90,6 +106,10 @@ def match_to_row(row: dict[str, str], match: GameMatch | None, *, accept_thresho
             "notes": json.dumps(match.raw or {}, ensure_ascii=True)[:1000],
         }
     )
+    raw = match.raw or {}
+    updated["barcode"] = str(raw.get("barcode") or row.get("barcode") or "")
+    updated["source_provider"] = str(raw.get("source_provider") or row.get("source_provider") or "")
+    updated["source_id"] = str(raw.get("source_id") or row.get("source_id") or "")
     if not updated.get("platform") and match.platform:
         updated["platform"] = match.platform
     return updated

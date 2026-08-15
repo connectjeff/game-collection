@@ -4,6 +4,7 @@ import json
 import tempfile
 import threading
 import unittest
+import urllib.parse
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -125,6 +126,48 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn('name="platform" value="PlayStation 4"', body)
         self.assertIn("12 metadata rows", body)
         self.assertIn("Barcode Cache", body)
+        self.assertIn('action="/barcode-sources"', body)
+        self.assertIn('value="wikidata-video-games"', body)
+        self.assertIn('value="csv-url"', body)
+
+    def test_barcode_source_post_downloads_and_rebuilds_caches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handler = type("TestCollectionHandler", (CollectionHandler,), {"db_path": root / "collection.sqlite3"})
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+
+            form = urllib.parse.urlencode(
+                {
+                    "source": "upcdev-search",
+                    "query": "Nintendo Switch",
+                    "incremental": "1",
+                }
+            ).encode("utf-8")
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/barcode-sources",
+                data=form,
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            with (
+                patch("game_collection.web.BARCODE_SOURCE_ROOT", root / "barcode-sources"),
+                patch("game_collection.web.download_upcdev_search", return_value=[object()]) as download,
+                patch("game_collection.web.build_barcode_cache", return_value={"Nintendo Switch": 1, "all": 1}) as build,
+                patch("game_collection.web.platform_cache_statuses") as statuses,
+            ):
+                statuses.return_value = [
+                    type("Status", (), {"name": "Nintendo Switch", "cached": True, "count": 9})(),
+                ]
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    html = response.read().decode("utf-8")
+
+        self.assertIn("Downloaded 1 source row", html)
+        download.assert_called_once()
+        build.assert_called_once()
 
     def test_review_table_shows_uploaded_image_and_cached_cover(self) -> None:
         with patch("game_collection.web.platform_cache_statuses") as statuses:
@@ -141,6 +184,9 @@ class WebIngestTests(unittest.TestCase):
                         "candidate_title": "Metroid Prime",
                         "platform": "Nintendo GameCube",
                         "play_status": "completed",
+                        "barcode": "045496905651",
+                        "source_provider": "wikidata",
+                        "source_id": "Q1",
                         "provider": "igdb",
                         "provider_game_id": "123",
                         "matched_title": "Metroid Prime",
@@ -153,6 +199,7 @@ class WebIngestTests(unittest.TestCase):
 
         self.assertIn("Uploaded", body)
         self.assertIn("Matched", body)
+        self.assertIn("wikidata | Q1 | 045496905651", body)
         self.assertIn("review/cover-indexes/igdb/gamecube/covers/123.jpg", body)
         self.assertNotIn("<th>Notes</th>", body)
         self.assertNotIn("<th>Provider</th>", body)

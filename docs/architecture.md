@@ -127,6 +127,8 @@ No-subscription source connectors normalize public data into the same CSV schema
 
 These connectors do not guarantee complete coverage. They are cache seeders for sources that expose data without paid access; exact ingest still depends on the barcode being present in the local cache.
 
+The same source downloads are available from the `Cache Settings` web page. Downloaded source CSVs are stored under ignored local paths in `review/barcode-sources/`, then `review/barcodes/` is rebuilt from those source files. Source downloads support incremental merge behavior; Wikidata also accepts limit/offset paging.
+
 The scanner anticipates standard retail game packaging codes:
 
 - GTIN-12 / UPC-A for North American releases.

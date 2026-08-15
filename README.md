@@ -230,6 +230,9 @@ game-collection download-barcode-source upcdev-product --barcode 045496905651 --
 
 # Public lookup of known barcodes from Open Products Facts.
 game-collection download-barcode-source open-products-facts --barcode 045496905651 --out review/barcode-sources/open-products-facts-known.csv
+
+# Normalize a public CSV URL.
+game-collection download-barcode-source csv-url --url "https://example.com/video-game-barcodes.csv" --out review/barcode-sources/example.csv
 ```
 
 Then build the cache from those downloaded CSVs:
@@ -237,6 +240,10 @@ Then build the cache from those downloaded CSVs:
 ```bash
 game-collection build-barcode-cache --source review/barcode-sources/
 ```
+
+Use `--incremental` to merge newly downloaded rows into an existing source CSV. For Wikidata, `--limit` and `--offset` can be used for page-sized refreshes.
+
+The browser `Cache Settings` page also has a `Barcode Sources` form that downloads these public sources into `review/barcode-sources/` and rebuilds local barcode caches in one action.
 
 CSV columns are:
 

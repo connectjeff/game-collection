@@ -7,7 +7,13 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .barcode_match import BarcodeCatalogEntry, normalize_barcode, write_barcode_catalog
+from .barcode_match import (
+    BarcodeCatalogEntry,
+    _read_external_barcode_catalog_from_text,
+    normalize_barcode,
+    read_barcode_catalog,
+    write_barcode_catalog,
+)
 
 
 USER_AGENT = "game-collection/0.1 (local barcode cache builder)"
@@ -20,8 +26,18 @@ class BarcodeSourceError(RuntimeError):
     pass
 
 
-def download_wikidata_video_game_barcodes(out_path: Path, *, limit: int | None = None) -> list[BarcodeCatalogEntry]:
+def download_wikidata_video_game_barcodes(
+    out_path: Path,
+    *,
+    limit: int | None = None,
+    offset: int | None = None,
+    incremental: bool = False,
+) -> list[BarcodeCatalogEntry]:
+    existing = read_barcode_catalog(out_path) if incremental and out_path.exists() else []
+    if incremental and offset is None and limit is not None:
+        offset = len(existing)
     limit_clause = f"LIMIT {limit}" if limit else ""
+    offset_clause = f"OFFSET {offset}" if offset else ""
     query = f"""
 SELECT ?item ?itemLabel ?gtin ?platformLabel WHERE {{
   ?item wdt:P3962 ?gtin.
@@ -30,6 +46,7 @@ SELECT ?item ?itemLabel ?gtin ?platformLabel WHERE {{
   SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
 }}
 {limit_clause}
+{offset_clause}
 """
     payload = _get_json(
         f"{WIKIDATA_SPARQL_ENDPOINT}?{urllib.parse.urlencode({'query': query, 'format': 'json'})}"
@@ -50,11 +67,13 @@ SELECT ?item ?itemLabel ?gtin ?platformLabel WHERE {{
                 provider_game_id=_binding_value(binding, "item").rsplit("/", 1)[-1],
             )
         )
-    write_barcode_catalog(out_path, entries)
-    return entries
+    merged = _merge_entries(existing, entries)
+    write_barcode_catalog(out_path, merged)
+    return merged
 
 
-def download_upcdev_products(out_path: Path, *, barcodes: list[str]) -> list[BarcodeCatalogEntry]:
+def download_upcdev_products(out_path: Path, *, barcodes: list[str], incremental: bool = False) -> list[BarcodeCatalogEntry]:
+    existing = read_barcode_catalog(out_path) if incremental and out_path.exists() else []
     entries: list[BarcodeCatalogEntry] = []
     for barcode in barcodes:
         normalized = normalize_barcode(barcode)
@@ -68,19 +87,28 @@ def download_upcdev_products(out_path: Path, *, barcodes: list[str]) -> list[Bar
         entry = _upcdev_product_to_entry(product)
         if entry:
             entries.append(entry)
-    write_barcode_catalog(out_path, entries)
-    return entries
+    merged = _merge_entries(existing, entries)
+    write_barcode_catalog(out_path, merged)
+    return merged
 
 
-def download_upcdev_search(out_path: Path, *, query: str) -> list[BarcodeCatalogEntry]:
+def download_upcdev_search(out_path: Path, *, query: str, incremental: bool = False) -> list[BarcodeCatalogEntry]:
+    existing = read_barcode_catalog(out_path) if incremental and out_path.exists() else []
     payload = _get_json(f"{UPCDEV_BASE_URL}/search?{urllib.parse.urlencode({'q': query})}")
     products = payload.get("data", {}).get("products") or []
     entries = [entry for product in products if (entry := _upcdev_product_to_entry(product))]
-    write_barcode_catalog(out_path, entries)
-    return entries
+    merged = _merge_entries(existing, entries)
+    write_barcode_catalog(out_path, merged)
+    return merged
 
 
-def download_open_products_facts_products(out_path: Path, *, barcodes: list[str]) -> list[BarcodeCatalogEntry]:
+def download_open_products_facts_products(
+    out_path: Path,
+    *,
+    barcodes: list[str],
+    incremental: bool = False,
+) -> list[BarcodeCatalogEntry]:
+    existing = read_barcode_catalog(out_path) if incremental and out_path.exists() else []
     entries: list[BarcodeCatalogEntry] = []
     for barcode in barcodes:
         normalized = normalize_barcode(barcode)
@@ -108,8 +136,17 @@ def download_open_products_facts_products(out_path: Path, *, barcodes: list[str]
                 cover_url=str(product.get("image_front_url") or product.get("image_url") or "") or None,
             )
         )
-    write_barcode_catalog(out_path, entries)
-    return entries
+    merged = _merge_entries(existing, entries)
+    write_barcode_catalog(out_path, merged)
+    return merged
+
+
+def download_csv_url(out_path: Path, *, url: str, incremental: bool = False) -> list[BarcodeCatalogEntry]:
+    existing = read_barcode_catalog(out_path) if incremental and out_path.exists() else []
+    entries = _read_external_barcode_catalog_from_text(_read_url_text(url))
+    merged = _merge_entries(existing, entries)
+    write_barcode_catalog(out_path, merged)
+    return merged
 
 
 def read_barcodes_file(path: Path) -> list[str]:
@@ -134,6 +171,30 @@ def _get_json(url: str) -> dict[str, Any]:
             return json.loads(response.read().decode("utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise BarcodeSourceError(f"Barcode source request failed: {url}") from exc
+
+
+def _read_url_text(url: str) -> str:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "text/csv,*/*",
+            "User-Agent": USER_AGENT,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return response.read().decode("utf-8-sig")
+    except OSError as exc:
+        raise BarcodeSourceError(f"Barcode CSV request failed: {url}") from exc
+
+
+def _merge_entries(existing: list[BarcodeCatalogEntry], incoming: list[BarcodeCatalogEntry]) -> list[BarcodeCatalogEntry]:
+    merged: dict[tuple[str, str], BarcodeCatalogEntry] = {}
+    for entry in [*existing, *incoming]:
+        key = (normalize_barcode(entry.barcode), (entry.platform or "").casefold())
+        if key[0]:
+            merged[key] = entry
+    return sorted(merged.values(), key=lambda entry: ((entry.platform or "").casefold(), entry.title.casefold(), entry.barcode))
 
 
 def _binding_value(binding: dict[str, Any], key: str) -> str:

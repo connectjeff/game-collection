@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from game_collection.barcode_match import read_barcode_catalog
 from game_collection.barcode_sources import (
+    download_csv_url,
     download_open_products_facts_products,
     download_upcdev_products,
     download_upcdev_search,
@@ -94,6 +95,24 @@ class BarcodeSourceTests(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].provider, "openproductsfacts")
         self.assertEqual(entries[0].platform, "PlayStation 5")
+
+    def test_download_csv_url_incrementally_merges_existing_rows(self) -> None:
+        csv_text = (
+            "upc,product-name,console-name\n"
+            "889842123456,Example Xbox Series X Game,Xbox Series X|S\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "source.csv"
+            out.write_text(
+                "barcode,title,platform,provider,provider_game_id,release_date,developer,publisher,description,cover_url\n"
+                "045496905651,Super Mario Galaxy + Super Mario Galaxy 2,Nintendo Switch,wikidata,Q1,,,,,\n",
+                encoding="utf-8",
+            )
+            with patch("game_collection.barcode_sources._read_url_text", return_value=csv_text):
+                entries = download_csv_url(out, url="https://example.test/source.csv", incremental=True)
+
+        self.assertEqual(len(entries), 2)
+        self.assertEqual({entry.platform for entry in entries}, {"Nintendo Switch", "Xbox Series X|S"})
 
 
 if __name__ == "__main__":
