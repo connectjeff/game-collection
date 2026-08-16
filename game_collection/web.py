@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from . import db
-from .automation import import_accepted_rows
+from .automation import find_duplicate_accepted_rows, import_accepted_rows
 from .barcode_match import BARCODE_CACHE_ROOT, barcode_cache_statuses, build_barcode_cache, read_platform_barcode_cache
 from .barcode_sources import (
     BarcodeSourceError,
@@ -80,6 +80,7 @@ def _blank_review_row(*, platform: str | None, play_status: str | None, note: st
         "sample_image_path": "",
         "candidate_title": "",
         "platform": platform or "",
+        "acquisition_status": "owned",
         "play_status": play_status or "unplayed",
         "barcode": "",
         "source_provider": "",
@@ -646,6 +647,10 @@ def _layout(title: str, body: str) -> bytes:
       background: #e7ebef;
       color: var(--text);
     }}
+    .button.danger, button.danger {{
+      background: #b42318;
+      color: #fff;
+    }}
     .button-icon {{
       font-size: 17px;
       line-height: 1;
@@ -731,6 +736,11 @@ def _layout(title: str, body: str) -> bytes:
       grid-template-columns: minmax(0, 1fr) auto;
       gap: 10px;
       max-width: 680px;
+    }}
+    .library-search-actions {{
+      display: flex;
+      gap: 8px;
+      align-items: stretch;
     }}
     .library-search input {{
       min-height: 44px;
@@ -897,6 +907,36 @@ def _layout(title: str, body: str) -> bytes:
       gap: 22px;
       align-items: start;
     }}
+    .cover-stack {{
+      display: grid;
+      gap: 12px;
+    }}
+    .metadata-list {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin: 0;
+    }}
+    .metadata-list div {{
+      min-width: 0;
+    }}
+    .metadata-list dt {{
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 4px;
+    }}
+    .metadata-list dd {{
+      margin: 0;
+      overflow-wrap: anywhere;
+      font-weight: 650;
+    }}
+    .metadata-description {{
+      grid-column: 1 / -1;
+    }}
+    .metadata-description dd {{
+      font-weight: 400;
+      white-space: pre-wrap;
+    }}
     .cover {{
       width: 100%;
       aspect-ratio: 3 / 4;
@@ -998,16 +1038,21 @@ def _layout(title: str, body: str) -> bytes:
       display: grid;
       gap: 12px;
     }}
+    .review-state-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }}
     .single-review-actions {{
-      display: flex;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 10px;
-      flex-wrap: wrap;
       margin-top: 4px;
     }}
     .single-review-actions button, .single-review-actions .button {{
-      flex: 1 1 116px;
       justify-content: center;
       text-align: center;
+      width: 100%;
     }}
     .single-review-actions .reject {{
       background: #ece3db;
@@ -1227,7 +1272,8 @@ def _layout(title: str, body: str) -> bytes:
       }}
       .library-hero {{ padding-left: 16px; padding-right: 16px; }}
       .library-title {{ font-size: 25px; }}
-      .library-search {{ grid-template-columns: 1fr; }}
+      .library-search {{ grid-template-columns: minmax(0, 1fr) auto; }}
+      .library-search-actions {{ justify-content: end; }}
       .filter-row {{ padding-right: 16px; }}
       .library-summary {{ padding-left: 16px; padding-right: 16px; }}
       .shelf-header {{ padding-left: 16px; padding-right: 16px; }}
@@ -1237,7 +1283,7 @@ def _layout(title: str, body: str) -> bytes:
         padding-left: 16px;
         padding-right: 16px;
       }}
-      form.filters, .detail, .grid, .ingest-summary-grid, .manual-review-form, .single-review {{ grid-template-columns: 1fr; }}
+      form.filters, .detail, .grid, .metadata-list, .ingest-summary-grid, .manual-review-form, .single-review, .review-state-grid {{ grid-template-columns: 1fr; }}
       table, thead, tbody, tr, th, td {{ display: block; }}
       thead {{ display: none; }}
       tr {{ border-bottom: 1px solid var(--line); padding: 8px 0; }}
@@ -1703,16 +1749,27 @@ def _layout(title: str, body: str) -> bytes:
       }});
     }}
 
-    function installChangeMatchButtons() {{
-      document.querySelectorAll("[data-role='change-match']").forEach((button) => {{
-        button.addEventListener("click", () => {{
-          const input = document.querySelector("[data-role='match-title-input']");
-          if (!input) return;
-          input.focus();
-          input.select();
-          loadMatches(input);
-        }});
-      }});
+    function installPlatformHintMemory() {{
+      const select = document.querySelector("[data-role='platform-hint']");
+      if (!select) return;
+      const key = "game_collection_last_platform";
+      const params = new URLSearchParams(window.location.search);
+      const queryPlatform = params.get("platform") || "";
+      const storedPlatform = (() => {{
+        try {{ return window.localStorage.getItem(key) || ""; }}
+        catch (_) {{ return ""; }}
+      }})();
+      const candidate = queryPlatform || storedPlatform;
+      if (candidate && Array.from(select.options).some((option) => option.value === candidate)) {{
+        select.value = candidate;
+      }}
+      const save = () => {{
+        if (!select.value) return;
+        try {{ window.localStorage.setItem(key, select.value); }}
+        catch (_) {{}}
+      }};
+      select.addEventListener("change", save);
+      select.form?.addEventListener("submit", save);
     }}
 
     function installServiceWorker() {{
@@ -1727,7 +1784,7 @@ def _layout(title: str, body: str) -> bytes:
       installManualReview();
       installDecisionActions();
       installImageModal();
-      installChangeMatchButtons();
+      installPlatformHintMemory();
       installServiceWorker();
     }});
   </script>
@@ -1777,12 +1834,16 @@ class CollectionHandler(BaseHTTPRequestHandler):
     def _redirect(self, path: str) -> None:
         self.send_response(HTTPStatus.SEE_OTHER)
         self.send_header("Location", path)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
     def _redirect_remembering_platform(self, path: str, platform: str) -> None:
         self.send_response(HTTPStatus.SEE_OTHER)
         self.send_header("Location", path)
         self._remember_platform(platform)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
     def _last_platform(self) -> str:
@@ -1852,7 +1913,8 @@ class CollectionHandler(BaseHTTPRequestHandler):
         if parsed.path == "/ingest":
             params = urllib.parse.parse_qs(parsed.query)
             message = (params.get("message") or [""])[0]
-            self._send_html("Upload Photos", self._ingest_form(message or None))
+            platform = (params.get("platform") or [""])[0]
+            self._send_html("Upload Photos", self._ingest_form(message or None, selected_platform=platform or None))
             return
         if parsed.path == "/caches":
             self._send_html("Cache Settings", self._cache_settings())
@@ -1897,32 +1959,25 @@ class CollectionHandler(BaseHTTPRequestHandler):
             return
         form = self._form()
         with db.connect(self.db_path) as conn:
-            if parsed.path.startswith("/games/") and parsed.path.endswith("/metadata"):
-                game_id = int(parsed.path.split("/")[2])
-                db.update_game_metadata(
-                    conn,
-                    game_id=game_id,
-                    title=form["title"].strip(),
-                    platform=form.get("platform") or None,
-                    release_date=form.get("release_date") or None,
-                    developer=form.get("developer") or None,
-                    publisher=form.get("publisher") or None,
-                    description=form.get("description") or None,
-                    cover_url=form.get("cover_url") or None,
-                )
-                self._redirect(f"/games/{game_id}")
-                return
             if parsed.path.startswith("/items/") and parsed.path.endswith("/collection"):
                 item_id = int(parsed.path.split("/")[2])
                 db.update_collection_item(
                     conn,
                     collection_item_id=item_id,
                     acquisition_status=form["acquisition_status"],
-                    condition_notes=form.get("condition_notes") or None,
-                    location=form.get("location") or None,
-                    sale_notes=form.get("sale_notes") or None,
                 )
+                if form.get("play_status"):
+                    db.add_playthrough(
+                        conn,
+                        game_id=int(form["game_id"]),
+                        play_status=form["play_status"],
+                    )
                 self._redirect(f"/games/{form['game_id']}")
+                return
+            if parsed.path.startswith("/items/") and parsed.path.endswith("/delete"):
+                item_id = int(parsed.path.split("/")[2])
+                db.delete_collection_item(conn, collection_item_id=item_id)
+                self._redirect("/")
                 return
             if parsed.path.startswith("/games/") and parsed.path.endswith("/play"):
                 game_id = int(parsed.path.split("/")[2])
@@ -1930,7 +1985,6 @@ class CollectionHandler(BaseHTTPRequestHandler):
                     conn,
                     game_id=game_id,
                     play_status=form["play_status"],
-                    notes=form.get("notes") or None,
                 )
                 self._redirect(f"/games/{game_id}")
                 return
@@ -2005,6 +2059,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
         platform_filter = (params.get("platform") or [""])[0]
         publisher_filter = (params.get("publisher") or [""])[0]
         era_filter = (params.get("era") or [""])[0]
+        message = (params.get("message") or [""])[0]
         conn = db.connect(self.db_path)
         try:
             rows = [dict(row) for row in db.list_collection(conn)]
@@ -2068,15 +2123,24 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 for status in PLAY_STATUSES
             ],
         ]
+        clear_search = (
+            '<a class="button secondary" href="/" aria-label="Clear search and filters">'
+            '<span class="button-icon">&#8634;</span></a>'
+            if any(active_params.values())
+            else ""
+        )
         body = f"""
 <div class="library-shell">
   <section class="library-hero">
     <div class="library-kicker">Physical Library</div>
     <h1 class="library-title">Browse your games by what to play, keep, finish, or sell.</h1>
-    <p class="library-subtitle">Swipe shelves by platform, publisher, release era, ownership, and play status. Cover art remains a visual verification aid; barcode data remains the inventory source.</p>
+    <p class="library-subtitle">Swipe shelves by platform, publisher, release era, ownership, and play status.</p>
     <form class="library-search" method="get" action="/">
       <input name="q" value="{_h(q_raw)}" placeholder="Search title, platform, publisher, or developer">
-      <button type="submit" aria-label="Search"><span class="button-icon">&#128269;</span></button>
+      <div class="library-search-actions">
+        <button type="submit" aria-label="Search"><span class="button-icon">&#128269;</span></button>
+        {clear_search}
+      </div>
       <input type="hidden" name="owning" value="{_h(owning)}">
       <input type="hidden" name="played" value="{_h(played)}">
       <input type="hidden" name="platform" value="{_h(platform_filter)}">
@@ -2091,6 +2155,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
       <div class="filter-row">{_chip("All Eras", active=not era_filter, **{**active_params, "era": ""})}{''.join(era_chips)}</div>
     </div>
   </section>
+  {f'<div class="notice">{_h(message)}</div>' if message else ''}
   <p class="library-summary">{len(filtered)} shown from {len(rows)} collection item(s).</p>
   {_handler_type(self)._library_shelves(self, filtered)}
 </div>
@@ -2384,10 +2449,16 @@ class CollectionHandler(BaseHTTPRequestHandler):
         except (ProviderError, ValueError) as exc:
             self._send_html("Cache Settings", self._cache_settings(str(exc), error=True), HTTPStatus.BAD_REQUEST)
 
-    def _ingest_form(self, message: str | None = None, *, error: bool = False) -> str:
+    def _ingest_form(
+        self,
+        message: str | None = None,
+        *,
+        error: bool = False,
+        selected_platform: str | None = None,
+    ) -> str:
         notice = f'<div class="notice{" error" if error else ""}">{_h(message)}</div>' if message else ""
         cached_platforms = _cached_platform_options(self.platform_options)
-        current_platform = self._last_platform() if not isinstance(self, type) else ""
+        current_platform = selected_platform or (self._last_platform() if not isinstance(self, type) else "")
         if current_platform not in cached_platforms:
             current_platform = ""
         platform_options = "".join(
@@ -2395,15 +2466,15 @@ class CollectionHandler(BaseHTTPRequestHandler):
             for platform in cached_platforms
         )
         platform_control = (
-            f'<select name="platform" required>{platform_options}</select>'
+            f'<select name="platform" required data-role="platform-hint">{platform_options}</select>'
             if cached_platforms
-            else '<select name="platform" required disabled><option value="">No cached platforms</option></select>'
+            else '<select name="platform" required disabled data-role="platform-hint"><option value="">No cached platforms</option></select>'
         )
         return f"""
 <div class="app-page">
   <section class="page-hero">
     <div class="page-kicker">Barcode Ingest</div>
-    <h1 class="page-title">Scan One Game</h1>
+    <h1 class="page-title">Scan Game</h1>
     <p class="page-subtitle">Upload or take one back-cover photo. The app scans for one barcode match, then gives you a fast visual confirmation screen.</p>
   </section>
   {notice}
@@ -2492,6 +2563,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
                         _apply_cover_entry_to_row(row, cover_entry)
                         cover_entries.append(cover_entry)
                 row["decision"] = "review"
+                row["acquisition_status"] = status
                 row["play_status"] = played
             detected_count = len(rows)
             rows = rows[:1] if rows else [
@@ -2546,7 +2618,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
 <div class="app-page">
   <section class="page-hero">
     <div class="page-kicker">Confirm Match</div>
-    <h1 class="page-title">Review One Game</h1>
+    <h1 class="page-title">Review Game</h1>
     <p class="page-subtitle">Confirm the barcode result visually. Change the platform or title if needed, then accept or reject this scan.</p>
   </section>
   {notice}
@@ -2641,6 +2713,19 @@ class CollectionHandler(BaseHTTPRequestHandler):
             )
         )
         play_status = row.get("play_status") if row.get("play_status") in PLAY_STATUSES else "unplayed"
+        acquisition_status = (
+            row.get("acquisition_status")
+            if row.get("acquisition_status") in OWNERSHIP_STATUSES
+            else "owned"
+        )
+        ownership_options = "".join(
+            f'<option value="{status}"{_selected(acquisition_status, status)}>{status.replace("_", " ").title()}</option>'
+            for status in OWNERSHIP_STATUSES
+        )
+        play_options = "".join(
+            f'<option value="{status}"{_selected(play_status, status)}>{status.title()}</option>'
+            for status in PLAY_STATUSES
+        )
 
         return f"""
 <input type="hidden" name="row_count" value="1">
@@ -2660,16 +2745,21 @@ class CollectionHandler(BaseHTTPRequestHandler):
         <div class="match-suggestions" data-row="{index}" data-role="match-suggestions" hidden></div>
       </div>
     </label>
+    <div class="review-state-grid">
+      <label>Collection State
+        <select name="row_{index}_acquisition_status">{ownership_options}</select>
+      </label>
+      <label>Played State
+        <select name="row_{index}_play_status">{play_options}</select>
+      </label>
+    </div>
     <input type="hidden" name="row_{index}_upload_path" value="{_h(upload)}">
     <input type="hidden" name="row_{index}_sample_image_path" value="{_h(sample_image)}">
-    <input type="hidden" name="row_{index}_play_status" value="{_h(play_status)}">
     <input type="hidden" name="row_{index}_decision" value="review">
     {hidden_metadata}
     <div class="single-review-actions">
       <button type="submit" name="row_{index}_decision" value="accept" aria-label="Accept match"><span class="button-icon">&#10003;</span>Accept</button>
-      <button type="button" class="secondary" data-role="change-match" aria-label="Change match"><span class="button-icon">&#9998;</span>Edit</button>
       <button type="submit" class="reject" name="row_{index}_decision" value="ignore" formnovalidate aria-label="Reject match"><span class="button-icon">&#10005;</span>Reject</button>
-      <a class="button secondary" href="/ingest" aria-label="Scan another game"><span class="button-icon">&#8634;</span>Again</a>
     </div>
   </div>
 </section>
@@ -2686,6 +2776,21 @@ class CollectionHandler(BaseHTTPRequestHandler):
             rows.append(row)
         write_review(self._audit_path(run_id), rows)
         summary = self._summary(run_id)
+        duplicates = find_duplicate_accepted_rows(db_path=self.db_path, rows=rows)
+        reviewed_platform = next((row.get("platform") for row in rows if row.get("platform")), "")
+        if duplicates:
+            duplicate = duplicates[0]
+            platform = f" ({duplicate.platform})" if duplicate.platform else ""
+            status = duplicate.acquisition_status.replace("_", " ")
+            message = (
+                f"Duplicate blocked: {duplicate.title}{platform} is already in your library "
+                f"as {status}; play status is {duplicate.play_status}."
+            )
+            if reviewed_platform:
+                self._redirect_remembering_platform(f"/ingest?message={urllib.parse.quote(message)}", reviewed_platform)
+            else:
+                self._redirect(f"/ingest?message={urllib.parse.quote(message)}")
+            return
         imported, skipped = import_accepted_rows(
             db_path=self.db_path,
             rows=rows,
@@ -2693,8 +2798,11 @@ class CollectionHandler(BaseHTTPRequestHandler):
             played=summary.get("played") or "unplayed",
             skip_existing=True,
         )
-        message = f"Imported {imported}; skipped {skipped}."
-        reviewed_platform = next((row.get("platform") for row in rows if row.get("platform")), "")
+        message = (
+            "Duplicate blocked: this game is already in your library."
+            if skipped
+            else f"Imported {imported}; skipped {skipped}."
+        )
         if reviewed_platform:
             self._redirect_remembering_platform(f"/ingest?message={urllib.parse.quote(message)}", reviewed_platform)
         else:
@@ -2737,10 +2845,13 @@ class CollectionHandler(BaseHTTPRequestHandler):
             else '<div class="cover placeholder">No cover art</div>'
         )
         ownership_options = "".join(
-            f'<option value="{status}"{_selected(row["acquisition_status"], status)}>{status}</option>'
+            f'<option value="{status}"{_selected(row["acquisition_status"], status)}>{status.replace("_", " ").title()}</option>'
             for status in OWNERSHIP_STATUSES
         )
-        play_options = "".join(f'<option value="{status}">{status}</option>' for status in PLAY_STATUSES)
+        play_options = "".join(
+            f'<option value="{status}"{_selected(row["latest_play_status"], status)}>{status.title()}</option>'
+            for status in PLAY_STATUSES
+        )
         return f"""
 <div class="app-page">
   <section class="page-hero">
@@ -2749,54 +2860,34 @@ class CollectionHandler(BaseHTTPRequestHandler):
     <p class="page-subtitle">{_h(row['platform']) or 'No platform'}{(' | ' + _h(row['publisher'])) if row['publisher'] else ''}</p>
   </section>
   <div class="detail">
-    <div>
+    <div class="cover-stack">
       {cover}
-      <p class="page-subtitle">{_h(row['provider'])}:{_h(row['provider_game_id'])}</p>
+      <section class="panel">
+        <dl class="metadata-list">
+          <div><dt>Release date</dt><dd>{_h(row['release_date']) or 'Unknown'}</dd></div>
+          <div class="metadata-description"><dt>Description</dt><dd>{_h(row['description']) or 'No description available.'}</dd></div>
+        </dl>
+        <div class="actions">
+          <a class="button secondary" href="/" aria-label="Back to library"><span class="button-icon">&#8592;</span>Back</a>
+          <form method="post" action="/items/{row['collection_item_id']}/delete" onsubmit="return confirm('Delete this game from your library? This removes the collection copy but keeps historical game metadata.');">
+            <button class="danger" type="submit" aria-label="Delete from library"><span class="button-icon">&#128465;</span>Delete</button>
+          </form>
+        </div>
+      </section>
     </div>
     <div class="page-stack">
       <section class="panel">
-        <h2>Metadata</h2>
-        <form method="post" action="/games/{game_id}/metadata">
-          <div class="grid">
-            <label>Title <input name="title" value="{_h(row['title'])}" required></label>
-            <label>Platform <input name="platform" value="{_h(row['platform'])}"></label>
-            <label>Release date <input name="release_date" value="{_h(row['release_date'])}" placeholder="YYYY-MM-DD"></label>
-            <label>Developer <input name="developer" value="{_h(row['developer'])}"></label>
-            <label>Publisher <input name="publisher" value="{_h(row['publisher'])}"></label>
-            <label>Cover URL <input name="cover_url" value="{_h(row['cover_url'])}"></label>
-          </div>
-          <label>Description <textarea name="description">{_h(row['description'])}</textarea></label>
-          <div class="actions"><button type="submit"><span class="button-icon">&#10003;</span>Save</button><a class="button secondary" href="/" aria-label="Back to library"><span class="button-icon">&#8592;</span>Back</a></div>
-        </form>
-      </section>
-
-      <section class="panel">
-        <h2>Collection Copy</h2>
         <form method="post" action="/items/{row['collection_item_id']}/collection">
           <input type="hidden" name="game_id" value="{game_id}">
-          <div class="grid">
-            <label>Ownership
+          <div class="review-state-grid">
+            <label>Collection State
               <select name="acquisition_status">{ownership_options}</select>
             </label>
-            <label>Location <input name="location" value="{_h(row['location'])}"></label>
-          </div>
-          <label>Condition notes <textarea name="condition_notes">{_h(row['condition_notes'])}</textarea></label>
-          <label>Sale notes <textarea name="sale_notes">{_h(row['sale_notes'])}</textarea></label>
-          <p class="muted">Latest play status: <strong>{_h(row['latest_play_status'])}</strong>{' | Sold on: ' + _h(row['sold_on']) if row['sold_on'] else ''}</p>
-          <div class="actions"><button type="submit"><span class="button-icon">&#10003;</span>Save</button></div>
-        </form>
-      </section>
-
-      <section class="panel">
-        <h2>Play History</h2>
-        <form method="post" action="/games/{game_id}/play">
-          <div class="grid">
-            <label>New play status
+            <label>Played State
               <select name="play_status">{play_options}</select>
             </label>
-            <label>Notes <input name="notes" placeholder="Optional note"></label>
           </div>
-          <div class="actions"><button type="submit"><span class="button-icon">&#9679;</span>Log</button></div>
+          <div class="actions"><button type="submit"><span class="button-icon">&#10003;</span>Save</button></div>
         </form>
       </section>
     </div>

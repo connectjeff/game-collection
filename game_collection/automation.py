@@ -5,53 +5,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import db
-from .providers import MetadataProvider
-from .review import match_to_row, read_review, write_review
 
 
 @dataclass(frozen=True)
-class AutoIngestResult:
-    imported: int
-    skipped_existing: int
-    needs_review: int
-    audit_path: Path
-
-
-def match_review_rows(
-    *,
-    provider: MetadataProvider,
-    rows: list[dict[str, str]],
-    accept_threshold: float,
-    limit: int = 3,
-) -> list[dict[str, str]]:
-    matched_rows: list[dict[str, str]] = []
-    for row in rows:
-        candidate_title = row.get("candidate_title", "").strip()
-        if not candidate_title:
-            updated = dict(row)
-            updated["decision"] = "review"
-            matched_rows.append(updated)
-            continue
-
-        matches = provider.search(candidate_title, platform=row.get("platform") or None, limit=limit)
-        best = matches[0] if matches else None
-        updated = match_to_row(row, best, accept_threshold=accept_threshold)
-        if best and len(matches) > 1:
-            alternatives = [
-                {
-                    "provider_game_id": match.provider_game_id,
-                    "title": match.title,
-                    "platform": match.platform,
-                    "confidence": match.confidence,
-                }
-                for match in matches[1:]
-            ]
-            updated["notes"] = json.dumps(
-                {"best_raw": best.raw or {}, "alternatives": alternatives},
-                ensure_ascii=True,
-            )[:1000]
-        matched_rows.append(updated)
-    return matched_rows
+class DuplicateAcceptedRow:
+    title: str
+    platform: str | None
+    acquisition_status: str
+    play_status: str
 
 
 def import_accepted_rows(
@@ -85,10 +46,17 @@ def import_accepted_rows(
                 cover_url=row.get("cover_url") or None,
                 metadata_json=json.dumps({"review_notes": row.get("notes")}, ensure_ascii=True),
             )
-            if skip_existing and db.has_collection_item(conn, game_id=game_id):
+            title = row.get("matched_title") or row["candidate_title"]
+            existing_title = db.find_collection_item_by_title(
+                conn,
+                title=title,
+                platform=row.get("platform") or None,
+            )
+            if skip_existing and (db.has_collection_item(conn, game_id=game_id) or existing_title):
                 skipped_existing += 1
                 continue
-            db.add_collection_item(conn, game_id=game_id, acquisition_status=status)
+            row_status = row.get("acquisition_status") if row.get("acquisition_status") in {"owned", "would_sell", "sold", "loaned", "wishlist"} else status
+            db.add_collection_item(conn, game_id=game_id, acquisition_status=row_status)
             db.add_playthrough(conn, game_id=game_id, play_status=row.get("play_status") or played)
             imported += 1
         conn.commit()
@@ -97,31 +65,31 @@ def import_accepted_rows(
     return imported, skipped_existing
 
 
-def auto_import_review(
-    *,
-    db_path: Path,
-    review_csv: Path,
-    provider: MetadataProvider,
-    audit_path: Path,
-    accept_threshold: float,
-    status: str,
-    played: str,
-    skip_existing: bool = True,
-) -> AutoIngestResult:
-    rows = read_review(review_csv)
-    matched_rows = match_review_rows(provider=provider, rows=rows, accept_threshold=accept_threshold)
-    write_review(audit_path, matched_rows)
-    imported, skipped_existing = import_accepted_rows(
-        db_path=db_path,
-        rows=matched_rows,
-        status=status,
-        played=played,
-        skip_existing=skip_existing,
-    )
-    needs_review = sum(1 for row in matched_rows if row.get("decision") != "accept")
-    return AutoIngestResult(
-        imported=imported,
-        skipped_existing=skipped_existing,
-        needs_review=needs_review,
-        audit_path=audit_path,
-    )
+def find_duplicate_accepted_rows(*, db_path: Path, rows: list[dict[str, str]]) -> list[DuplicateAcceptedRow]:
+    db.init_db(db_path)
+    duplicates: list[DuplicateAcceptedRow] = []
+    conn = db.connect(db_path)
+    try:
+        for row in rows:
+            if row.get("decision") != "accept":
+                continue
+            title = (row.get("matched_title") or row.get("candidate_title") or "").strip()
+            if not title:
+                continue
+            existing = db.find_collection_item_by_title(
+                conn,
+                title=title,
+                platform=row.get("platform") or None,
+            )
+            if existing:
+                duplicates.append(
+                    DuplicateAcceptedRow(
+                        title=str(existing["title"]),
+                        platform=existing["platform"],
+                        acquisition_status=str(existing["acquisition_status"]),
+                        play_status=str(existing["latest_play_status"]),
+                    )
+                )
+    finally:
+        conn.close()
+    return duplicates

@@ -12,6 +12,7 @@ INTAKE_FIELDS = [
     "sample_image_path",
     "candidate_title",
     "platform",
+    "acquisition_status",
     "play_status",
     "barcode",
     "source_provider",
@@ -33,36 +34,6 @@ LEGACY_FIELD_ALIASES = {
     "upload_path": "photo_path",
     "sample_image_path": "crop_path",
 }
-
-
-def write_intake_template(photo_path: Path, out_path: Path) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=INTAKE_FIELDS)
-        writer.writeheader()
-        writer.writerow(
-            {
-                "upload_path": str(photo_path),
-                "sample_image_path": "",
-                "candidate_title": "",
-                "platform": "",
-                "play_status": "unplayed",
-                "barcode": "",
-                "source_provider": "",
-                "source_id": "",
-                "provider": "",
-                "provider_game_id": "",
-                "matched_title": "",
-                "release_date": "",
-                "developer": "",
-                "publisher": "",
-                "description": "",
-                "cover_url": "",
-                "confidence": "",
-                "decision": "review",
-                "notes": "Fill candidate_title/platform, then run match-review.",
-            }
-        )
 
 
 def read_review(path: Path) -> list[dict[str, str]]:

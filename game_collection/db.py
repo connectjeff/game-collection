@@ -33,12 +33,6 @@ CREATE TABLE IF NOT EXISTS collection_items (
     game_id INTEGER NOT NULL REFERENCES games(id),
     acquisition_status TEXT NOT NULL DEFAULT 'owned'
         CHECK (acquisition_status IN ('owned', 'would_sell', 'sold', 'loaned', 'wishlist')),
-    condition_notes TEXT,
-    acquired_on TEXT,
-    sold_on TEXT,
-    sold_price_cents INTEGER,
-    sale_notes TEXT,
-    location TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -48,22 +42,11 @@ CREATE TABLE IF NOT EXISTS playthroughs (
     game_id INTEGER NOT NULL REFERENCES games(id),
     play_status TEXT NOT NULL
         CHECK (play_status IN ('unplayed', 'playing', 'completed', 'retired')),
-    started_on TEXT,
-    completed_on TEXT,
-    notes TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS tags (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE
-);
-
-CREATE TABLE IF NOT EXISTS game_tags (
-    game_id INTEGER NOT NULL REFERENCES games(id),
-    tag_id INTEGER NOT NULL REFERENCES tags(id),
-    PRIMARY KEY (game_id, tag_id)
-);
+DROP TABLE IF EXISTS game_tags;
+DROP TABLE IF EXISTS tags;
 
 DROP VIEW IF EXISTS collection_summary;
 
@@ -111,6 +94,22 @@ def connect(path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
 def init_db(path: Path = DEFAULT_DB_PATH) -> None:
     with connect(path) as conn:
         conn.executescript(SCHEMA)
+        _drop_column_if_present(conn, "collection_items", "condition_notes")
+        _drop_column_if_present(conn, "collection_items", "location")
+        _drop_column_if_present(conn, "collection_items", "sale_notes")
+        _drop_column_if_present(conn, "collection_items", "acquired_on")
+        _drop_column_if_present(conn, "collection_items", "sold_on")
+        _drop_column_if_present(conn, "collection_items", "sold_price_cents")
+        _drop_column_if_present(conn, "playthroughs", "notes")
+        _drop_column_if_present(conn, "playthroughs", "started_on")
+        _drop_column_if_present(conn, "playthroughs", "completed_on")
+
+
+def _drop_column_if_present(conn: sqlite3.Connection, table: str, column: str) -> None:
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        return
+    conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
 
 
 def upsert_game(
@@ -170,15 +169,13 @@ def add_collection_item(
     *,
     game_id: int,
     acquisition_status: str = "owned",
-    condition_notes: str | None = None,
-    location: str | None = None,
 ) -> int:
     cursor = conn.execute(
         """
-        INSERT INTO collection_items (game_id, acquisition_status, condition_notes, location)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO collection_items (game_id, acquisition_status)
+        VALUES (?, ?)
         """,
-        (game_id, acquisition_status, condition_notes, location),
+        (game_id, acquisition_status),
     )
     return int(cursor.lastrowid)
 
@@ -191,30 +188,54 @@ def has_collection_item(conn: sqlite3.Connection, *, game_id: int) -> bool:
     return row is not None
 
 
+def find_collection_item_by_title(
+    conn: sqlite3.Connection,
+    *,
+    title: str,
+    platform: str | None = None,
+) -> sqlite3.Row | None:
+    normalized_title = title.strip().casefold()
+    if not normalized_title:
+        return None
+    if platform:
+        return conn.execute(
+            """
+            SELECT collection_item_id, game_id, title, platform, acquisition_status, latest_play_status
+            FROM collection_summary
+            WHERE LOWER(title) = LOWER(?)
+              AND COALESCE(platform, '') = ?
+            ORDER BY collection_item_id DESC
+            LIMIT 1
+            """,
+            (title.strip(), platform.strip()),
+        ).fetchone()
+    return conn.execute(
+        """
+        SELECT collection_item_id, game_id, title, platform, acquisition_status, latest_play_status
+        FROM collection_summary
+        WHERE LOWER(title) = LOWER(?)
+        ORDER BY collection_item_id DESC
+        LIMIT 1
+        """,
+        (title.strip(),),
+    ).fetchone()
+
+
+def delete_collection_item(conn: sqlite3.Connection, *, collection_item_id: int) -> None:
+    conn.execute("DELETE FROM collection_items WHERE id = ?", (collection_item_id,))
+
+
 def add_playthrough(
     conn: sqlite3.Connection,
     *,
     game_id: int,
     play_status: str,
-    notes: str | None = None,
 ) -> int:
     cursor = conn.execute(
-        "INSERT INTO playthroughs (game_id, play_status, notes) VALUES (?, ?, ?)",
-        (game_id, play_status, notes),
+        "INSERT INTO playthroughs (game_id, play_status) VALUES (?, ?)",
+        (game_id, play_status),
     )
     return int(cursor.lastrowid)
-
-
-def mark_status(conn: sqlite3.Connection, *, collection_item_id: int, status: str) -> None:
-    sold_fields = ", sold_on = CASE WHEN ? = 'sold' THEN DATE('now') ELSE sold_on END"
-    conn.execute(
-        f"""
-        UPDATE collection_items
-        SET acquisition_status = ?, updated_at = CURRENT_TIMESTAMP {sold_fields}
-        WHERE id = ?
-        """,
-        (status, status, collection_item_id),
-    )
 
 
 def list_collection(conn: sqlite3.Connection) -> Iterable[sqlite3.Row]:
@@ -231,25 +252,6 @@ def list_collection(conn: sqlite3.Connection) -> Iterable[sqlite3.Row]:
     )
 
 
-def plan_next(conn: sqlite3.Connection, *, limit: int = 20) -> Iterable[sqlite3.Row]:
-    return conn.execute(
-        """
-        SELECT
-            collection_item_id, game_id, title, platform, acquisition_status,
-            latest_play_status, provider, provider_game_id, cover_url
-        FROM collection_summary
-        WHERE acquisition_status IN ('owned', 'would_sell')
-          AND latest_play_status IN ('unplayed', 'playing')
-        ORDER BY
-            CASE latest_play_status WHEN 'playing' THEN 0 ELSE 1 END,
-            title COLLATE NOCASE,
-            platform COLLATE NOCASE
-        LIMIT ?
-        """,
-        (limit,),
-    )
-
-
 def get_game_detail(conn: sqlite3.Connection, *, game_id: int) -> sqlite3.Row | None:
     return conn.execute(
         """
@@ -257,12 +259,6 @@ def get_game_detail(conn: sqlite3.Connection, *, game_id: int) -> sqlite3.Row | 
             g.*,
             ci.id AS collection_item_id,
             ci.acquisition_status,
-            ci.condition_notes,
-            ci.acquired_on,
-            ci.sold_on,
-            ci.sold_price_cents,
-            ci.sale_notes,
-            ci.location,
             COALESCE(
                 (
                     SELECT p2.play_status
@@ -318,28 +314,16 @@ def update_collection_item(
     *,
     collection_item_id: int,
     acquisition_status: str,
-    condition_notes: str | None,
-    location: str | None,
-    sale_notes: str | None,
 ) -> None:
-    sold_on_expr = "CASE WHEN ? = 'sold' THEN COALESCE(sold_on, DATE('now')) ELSE NULL END"
     conn.execute(
-        f"""
+        """
         UPDATE collection_items
         SET
             acquisition_status = ?,
-            condition_notes = ?,
-            location = ?,
-            sale_notes = ?,
-            sold_on = {sold_on_expr},
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
         (
-            acquisition_status,
-            condition_notes,
-            location,
-            sale_notes,
             acquisition_status,
             collection_item_id,
         ),

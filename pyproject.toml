@@ -1,7 +1,7 @@
 [project]
 name = "game-collection"
 version = "0.1.0"
-description = "Photo-assisted physical video game collection inventory pipeline"
+description = "Mobile web app for barcode-based physical video game collection inventory"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

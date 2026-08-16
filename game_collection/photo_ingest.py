@@ -6,7 +6,6 @@ from .barcode_match import BarcodeCatalogEntry, detect_barcodes, match_barcode
 from .barcode_sources import lookup_live_barcode
 from .cover_cache import CoverIndexEntry
 from .review import match_to_row
-from .review import write_review
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".heic", ".webp"}
@@ -110,39 +109,3 @@ def _blank_candidate_row(
         "decision": "review",
         "notes": notes,
     }
-
-
-def write_photo_candidates(
-    *,
-    photo_paths: list[Path],
-    out_path: Path,
-    crops_dir: Path,
-    platform: str | None = None,
-    cover_entries: list[CoverIndexEntry] | None = None,
-    barcode_entries: list[BarcodeCatalogEntry] | None = None,
-    live_lookup: bool = False,
-    accept_threshold: float = 0.92,
-) -> int:
-    all_rows: list[dict[str, str]] = []
-    for photo_path in photo_paths:
-        all_rows.extend(
-            detect_photo_candidates(
-                photo_path=photo_path,
-                crops_dir=crops_dir,
-                platform=platform,
-                cover_entries=cover_entries,
-                barcode_entries=barcode_entries,
-                live_lookup=live_lookup,
-                accept_threshold=accept_threshold,
-            )
-        )
-    write_review(out_path, all_rows)
-    return len(all_rows)
-
-
-def image_paths(path: Path) -> list[Path]:
-    if path.is_file():
-        return [path]
-    if not path.exists():
-        raise PhotoIngestError(f"Path does not exist: {path}")
-    return sorted(item for item in path.iterdir() if item.suffix.lower() in IMAGE_SUFFIXES)

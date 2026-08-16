@@ -178,6 +178,7 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn("2000s Releases", body)
         self.assertIn("2020s Releases", body)
         self.assertIn("https://example.test/metroid.jpg", body)
+        self.assertNotIn('aria-label="Clear search and filters"', body)
 
     def test_library_browser_filters_by_platform_and_publisher(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -211,6 +212,10 @@ class WebIngestTests(unittest.TestCase):
         self.assertNotIn("Halo</div>", body)
         self.assertIn("Nintendo Switch", body)
         self.assertIn("filter-chip active", body)
+        self.assertIn('href="/" aria-label="Clear search and filters"', body)
+        self.assertIn("library-search-actions", body)
+        self.assertIn("&#8634;", body)
+        self.assertNotIn("&#10005;</span></a>", body)
 
     def test_layout_omits_separate_plan_navigation(self) -> None:
         page = _layout("Game Collection", "<h1>Library</h1>").decode("utf-8")
@@ -218,6 +223,15 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn('href="/" aria-label="Library"', page)
         self.assertIn('href="/ingest" aria-label="Scan a barcode"', page)
         self.assertIn('href="/caches" aria-label="Cache settings"', page)
+
+    def test_library_search_actions_stay_inline_on_mobile(self) -> None:
+        page = _layout("Game Collection", "<h1>Library</h1>").decode("utf-8")
+
+        self.assertIn(
+            ".library-search { grid-template-columns: minmax(0, 1fr) auto; }",
+            page,
+        )
+        self.assertNotIn(".library-search { grid-template-columns: 1fr; }", page)
         self.assertNotIn('href="/plan"', page)
 
     def test_upload_form_includes_only_cached_platforms(self) -> None:
@@ -243,6 +257,7 @@ class WebIngestTests(unittest.TestCase):
         self.assertNotIn('name="upload_mode"', body)
         self.assertNotIn('name="photo_library"', body)
         self.assertNotIn('name="camera_photo"', body)
+        self.assertIn('data-role="platform-hint"', body)
 
     def test_upload_form_selects_last_platform_cookie(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -268,6 +283,30 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn('<option value="PlayStation 5" selected>PlayStation 5</option>', body)
         self.assertNotIn('capture="environment"', body)
 
+    def test_upload_form_selects_platform_query_parameter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            handler = type("TestCollectionHandler", (CollectionHandler,), {"db_path": Path(tmp) / "collection.sqlite3"})
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/ingest?platform=Nintendo%20Switch",
+                headers={"Cookie": "game_collection_last_platform=PlayStation%205"},
+            )
+            with patch("game_collection.web.platform_cache_statuses") as statuses:
+                statuses.return_value = [
+                    type("Status", (), {"name": "Nintendo Switch", "cached": True, "count": 12})(),
+                    type("Status", (), {"name": "PlayStation 5", "cached": True, "count": 9})(),
+                ]
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    body = response.read().decode("utf-8")
+
+        self.assertIn('<option value="Nintendo Switch" selected>Nintendo Switch</option>', body)
+        self.assertNotIn('<option value="PlayStation 5" selected>PlayStation 5</option>', body)
+
     def test_cache_settings_page_lists_platform_checkboxes(self) -> None:
         handler = type(
             "TestCollectionHandler",
@@ -291,6 +330,76 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn('value="csv-url"', body)
         self.assertIn('action="/library-art-refresh"', body)
         self.assertIn("Library Art", body)
+
+    def test_game_detail_can_delete_collection_item_with_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "collection.sqlite3"
+            db.init_db(db_path)
+            with db.connect(db_path) as conn:
+                game_id = db.upsert_game(
+                    conn,
+                    provider="igdb",
+                    provider_game_id="123",
+                    title="Metroid Prime",
+                    platform="Nintendo GameCube",
+                    release_date="2002-11-17",
+                    description="Explore Tallon IV.",
+                )
+                item_id = db.add_collection_item(conn, game_id=game_id)
+            handler = type("TestCollectionHandler", (CollectionHandler,), {"db_path": db_path})
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/games/{game_id}", timeout=10) as response:
+                detail = response.read().decode("utf-8")
+
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/items/{item_id}/delete",
+                data=b"",
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                status = response.status
+                location = response.url
+                redirected_body = response.read().decode("utf-8")
+
+            with db.connect(db_path) as conn:
+                rows = list(db.list_collection(conn))
+
+        self.assertIn(f'action="/items/{item_id}/delete"', detail)
+        self.assertIn("confirm('Delete this game from your library?", detail)
+        self.assertIn('class="cover-stack"', detail)
+        self.assertIn('class="metadata-list"', detail)
+        self.assertNotIn("<h2>Collection Copy</h2>", detail)
+        self.assertNotIn("<h2>Play History</h2>", detail)
+        self.assertNotIn(f'action="/games/{game_id}/metadata"', detail)
+        self.assertNotIn(f'action="/games/{game_id}/play"', detail)
+        self.assertIn(f'action="/items/{item_id}/collection"', detail)
+        self.assertNotIn("<h2>Metadata</h2>", detail)
+        self.assertNotIn("<dt>Title</dt>", detail)
+        self.assertNotIn("<dt>Platform</dt>", detail)
+        self.assertNotIn("<dt>Developer</dt>", detail)
+        self.assertNotIn("<dt>Publisher</dt>", detail)
+        self.assertNotIn('name="title" value="Metroid Prime"', detail)
+        self.assertNotIn("<dt>Cover URL</dt>", detail)
+        self.assertIn("<dt>Release date</dt><dd>2002-11-17</dd>", detail)
+        self.assertIn("<dt>Description</dt><dd>Explore Tallon IV.</dd>", detail)
+        self.assertIn("Collection State", detail)
+        self.assertIn("Played State", detail)
+        self.assertNotIn("Condition notes", detail)
+        self.assertNotIn("Sale notes", detail)
+        self.assertNotIn("Location", detail)
+        self.assertNotIn("Notes", detail)
+        self.assertIn('<option value="owned" selected>Owned</option>', detail)
+        self.assertIn('<option value="would_sell">Would Sell</option>', detail)
+        self.assertIn('<option value="unplayed" selected>Unplayed</option>', detail)
+        self.assertEqual(status, 200)
+        self.assertTrue(location.endswith("/"))
+        self.assertIn("0 shown from 0 collection item(s).", redirected_body)
+        self.assertEqual(rows, [])
 
     def test_library_art_refresh_updates_games_missing_cover_art(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -434,13 +543,22 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn('value="Nintendo GameCube" selected', body)
         self.assertIn('value="PlayStation 5"', body)
         self.assertNotIn("<th>Play Status</th>", body)
-        self.assertIn('type="hidden" name="row_0_play_status" value="completed"', body)
+        self.assertIn("Collection State", body)
+        self.assertIn("Played State", body)
+        self.assertIn('select name="row_0_acquisition_status"', body)
+        self.assertIn('select name="row_0_play_status"', body)
+        self.assertIn('<option value="owned" selected>Owned</option>', body)
+        self.assertIn('<option value="would_sell">Would Sell</option>', body)
+        self.assertIn('<option value="completed" selected>Completed</option>', body)
         self.assertIn('data-modal-image="/media?path=review/web-ingests/run/crops/upload-001-001.jpg"', body)
         self.assertIn('name="row_0_decision" value="accept"', body)
         self.assertIn('name="row_0_decision" value="ignore"', body)
         self.assertIn("Accept", body)
-        self.assertIn("Edit", body)
         self.assertIn("Reject", body)
+        self.assertNotIn("Edit", body)
+        self.assertNotIn("Again", body)
+        self.assertNotIn('aria-label="Change match"', body)
+        self.assertNotIn('aria-label="Scan another game"', body)
         self.assertNotIn("Review Queue", body)
         self.assertNotIn("Accepted", body)
         self.assertNotIn("Ignored", body)
@@ -675,6 +793,73 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn("game_collection_last_platform=Nintendo%20GameCube", cookie)
         self.assertEqual(len(rows), 1)
 
+    def test_accepting_duplicate_ingest_is_blocked_with_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "collection.sqlite3"
+            db.init_db(db_path)
+            with db.connect(db_path) as conn:
+                game_id = db.upsert_game(
+                    conn,
+                    provider="igdb",
+                    provider_game_id="123",
+                    title="Metroid Prime",
+                    platform="Nintendo GameCube",
+                )
+                db.add_collection_item(conn, game_id=game_id)
+                db.add_playthrough(conn, game_id=game_id, play_status="completed")
+            run_id = "run-duplicate"
+            run_dir = root / run_id
+            run_dir.mkdir()
+            (run_dir / "audit.csv").write_text(
+                "photo_path,crop_path,candidate_title,platform,play_status,barcode,source_provider,source_id,provider,provider_game_id,matched_title,release_date,developer,publisher,description,cover_url,confidence,decision,notes\n",
+                encoding="utf-8",
+            )
+            (run_dir / "summary.csv").write_text("status,owned\nplayed,unplayed\n", encoding="utf-8")
+            handler = type("TestCollectionHandler", (CollectionHandler,), {"db_path": db_path})
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+
+            form = urllib.parse.urlencode(
+                {
+                    "row_count": "1",
+                    "row_0_provider": "igdb",
+                    "row_0_provider_game_id": "123",
+                    "row_0_matched_title": "Metroid Prime",
+                    "row_0_platform": "Nintendo GameCube",
+                    "row_0_decision": "accept",
+                    "row_0_play_status": "unplayed",
+                }
+            ).encode("utf-8")
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/ingest/{run_id}/review",
+                data=form,
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+
+            class NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+
+            opener = urllib.request.build_opener(NoRedirect)
+            with patch("game_collection.web.WEB_INGEST_ROOT", root):
+                try:
+                    opener.open(request, timeout=10)
+                except urllib.error.HTTPError as exc:
+                    status = exc.code
+                    location = exc.headers["Location"]
+
+            with db.connect(db_path) as conn:
+                rows = list(db.list_collection(conn))
+
+        self.assertEqual(status, 303)
+        self.assertIn("Duplicate%20blocked", location)
+        self.assertEqual(len(rows), 1)
+
     def test_upload_ingest_creates_manual_review_suggestions_without_importing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -744,8 +929,10 @@ class WebIngestTests(unittest.TestCase):
                     html = response.read().decode("utf-8")
 
             self.assertIn("Ingest Results", html)
-            self.assertIn("Review One Game", html)
+            self.assertIn("Review Game", html)
             self.assertIn("Accept", html)
+            self.assertIn("Reject", html)
+            self.assertNotIn("Again", html)
             with db.connect(db_path) as conn:
                 rows = list(db.list_collection(conn))
             self.assertEqual(rows, [])
@@ -822,7 +1009,7 @@ class WebIngestTests(unittest.TestCase):
                 with urllib.request.urlopen(request, timeout=10) as response:
                     html = response.read().decode("utf-8")
 
-            self.assertIn("Review One Game", html)
+            self.assertIn("Review Game", html)
             self.assertNotIn("Detected barcodes:", html)
             self.assertIn('name="row_count" value="1"', html)
             self.assertIn('name="row_0_matched_title"', html)
@@ -1024,7 +1211,7 @@ class WebIngestTests(unittest.TestCase):
                 with urllib.request.urlopen(request, timeout=10) as response:
                     html = response.read().decode("utf-8")
 
-            self.assertIn("Review One Game", html)
+            self.assertIn("Review Game", html)
             self.assertIn('name="row_count" value="1"', html)
             self.assertIn('name="row_0_matched_title"', html)
             self.assertNotIn('name="row_1_matched_title"', html)

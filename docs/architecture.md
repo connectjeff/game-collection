@@ -1,141 +1,99 @@
 # Architecture
 
-## Goals
+## Goal
 
-The system should inventory physical games from wide photos while keeping a trustworthy local history of ownership and play status.
+The app manages a physical video game collection from a mobile-friendly local web UI.
 
-Core requirements:
+Current scope:
 
-- Add games from a floor-layout photo.
-- Use an external metadata/artwork provider where possible.
-- Plan what to play next from owned/unplayed games.
-- Track completed games independently of ownership.
-- Mark games as candidates for sale.
-- Mark games as sold without losing play history.
+- scan one back-cover barcode photo at a time,
+- resolve the barcode through local cache and live public lookup sources,
+- show provider box art for visual confirmation,
+- import only user-accepted matches,
+- track collection state and played state,
+- preserve play history after a game is sold,
+- keep all personal data out of the public repo.
 
-## Pipeline
+## Web Pipeline
 
 ```mermaid
 flowchart LR
-    A["Back-cover photo"] --> B["Barcode scan"]
-    B --> C["Local platform barcode cache"]
-    C --> D{"Exact code match?"}
-    D -->|yes| E["Review row with matched title"]
-    D -->|no| F["Manual review row"]
-    G["Cached provider metadata"] --> E
-    E --> H["Accepted rows import to SQLite"]
-    F --> H
-    H --> I["Planning and collection views"]
+    A["Mobile web scan"] --> B["Uploaded back-cover photo"]
+    B --> C["Barcode decode"]
+    C --> D["Local barcode cache"]
+    D --> E{"Exact code match?"}
+    E -->|miss| F["Live public barcode lookup"]
+    E -->|hit| G["Review Game"]
+    F --> G
+    H["Cached IGDB metadata"] --> G
+    G -->|Accept| I["SQLite library"]
+    G -->|Reject| A
+    I --> J["Library browser"]
 ```
+
+There is no user-facing folder ingestion method. The web server still stores uploaded images, audit rows, and caches under ignored local paths so the browser workflow can resume and display review state.
 
 ## Data Model
 
-`games` stores provider-backed identity and metadata. A game can exist even when you no longer own a copy.
+`games` stores provider identity and metadata:
 
-`collection_items` stores ownership state for a physical copy:
+- title,
+- platform,
+- release date,
+- description,
+- cover URL,
+- raw metadata JSON.
 
-- `owned`
-- `would_sell`
-- `sold`
-- `loaned`
-- `wishlist`
+`collection_items` stores one collection state per owned library item:
 
-`playthroughs` stores durable history:
+- `owned`,
+- `would_sell`,
+- `sold`,
+- `loaned`,
+- `wishlist`.
 
-- `unplayed`
-- `playing`
-- `completed`
-- `retired`
+`playthroughs` stores play state history:
 
-This is the key design choice: selling a copy updates `collection_items`, but completed history remains in `playthroughs`.
+- `unplayed`,
+- `playing`,
+- `completed`,
+- `retired`.
 
-## Provider Strategy
+`collection_summary` combines game metadata, collection state, and latest play state for the library UI.
 
-The metadata provider boundary returns a normalized `GameMatch` with title, platform, dates, cover URL, and raw provider payload.
+The schema intentionally does not include free-text condition/location/sale notes, sold price/date fields, separate play session notes, planning tables, or tag tables because those are not part of the current web app design.
 
-Start with:
+## Matching Strategy
 
-- TheGamesDB for community game/artwork data.
-- IGDB for richer metadata and cover art using Twitch client-credentials auth.
+Ingest is barcode-only. Cover art is never used as an image matching source.
 
-Add later:
+The scanner decodes and validates retail packaging codes:
 
-- RAWG as a broad fallback source if its attribution terms fit the UI.
-- Local LaunchBox export/import if you already maintain a LaunchBox library.
+- GTIN-12 / UPC-A for many North American releases,
+- GTIN-13 / EAN/JAN for international and Japanese releases,
+- GTIN-8 / UPC-E for compact labels,
+- GTIN-14 when a data source stores padded GTINs.
 
-## Recognition Strategy
+Platform hints rank and validate likely barcode formats, but do not create an identity match by themselves. Import identity requires a resolved barcode row or a user-selected title/platform in review.
 
-The photo recognizer should be optimized for accuracy over magic:
+## Caches
 
-1. Ask the user to photograph the backs of cases so barcodes are visible.
-2. Decode UPC/EAN barcodes from uploaded photos.
-3. Validate decoded values as GS1 GTIN-8/12/13/14 codes.
-4. Use the platform hint to prioritize expected publisher/manufacturer prefixes.
-5. Match decoded codes against the local platform barcode cache.
-6. Enrich matched titles from cached provider metadata when available.
-7. Add unmatched or missing expected titles as manual review rows.
-8. Import only rows explicitly accepted in review.
+The `Cache` page manages local data used by the web UI:
 
-## Automated Ingest
+- IGDB platform list,
+- title autocomplete indexes,
+- cover art for visual confirmation,
+- barcode source downloads,
+- local barcode cache rebuilds,
+- missing cover art refresh for library games.
 
-Photo ingest depends on the image-processing stack installed by the base project package:
+Local ignored paths:
 
-```toml
-dependencies = [
-    "numpy",
-    "opencv-python",
-]
+```text
+review/web-ingests/
+review/barcode-sources/
+review/barcodes/
+review/cache/
 ```
 
-The primary command is:
-
-```bash
-game-collection ingest-photos photos/incoming/ --provider igdb --platform "PlayStation 5"
-```
-
-It scans photos for barcodes, then writes:
-
-- `review/photo-candidates.csv` for barcode-derived candidates,
-- `review/photo-ingest.audit.csv` for match/import decisions,
-- `review/crops/` as a compatibility output directory.
-
-Rows are not imported automatically from photo upload. Accepted rows are imported after browser review.
-
-Prioritized platform indexes:
-
-- `PlayStation 5`
-- `PlayStation 4`
-- `Xbox One`
-- `Xbox Series X|S`
-
-The web server starts prebuilding those four metadata indexes in the background by default and caches the full IGDB platform list for the upload picklist. Barcode matching uses local CSV caches under `review/barcodes/`; cached provider metadata is used for autocomplete and cover art display.
-
-Barcode caches are built from CSV sources:
-
-```bash
-game-collection build-barcode-cache --source examples/barcode-catalog.example.csv
-```
-
-The builder accepts local CSV files, folders of CSV files, and CSV URLs. It recognizes the project schema plus common export column names such as `upc`, `ean`, `gtin`, `product-name`, and `console-name`, so a broad source export can populate caches for every platform present in that export.
-
-No-subscription source connectors normalize public data into the same CSV schema:
-
-- `wikidata-video-games`: SPARQL query for video game items with GTIN values.
-- `upcdev-search`: public text search against upc.dev.
-- `upcdev-product`: public lookup for known GTIN values through upc.dev.
-- `open-products-facts`: public lookup for known GTIN values through Open Products Facts.
-
-These connectors do not guarantee complete coverage. They are cache seeders for sources that expose data without paid access; exact ingest still depends on the barcode being present in the local cache.
-
-The same source downloads are available from the `Cache Settings` web page. Downloaded source CSVs are stored under ignored local paths in `review/barcode-sources/`, then `review/barcodes/` is rebuilt from those source files. Source downloads support incremental merge behavior; Wikidata also accepts limit/offset paging.
-
-The scanner anticipates standard retail game packaging codes:
-
-- GTIN-12 / UPC-A for North American releases.
-- GTIN-13 / EAN/JAN for international and Japanese releases.
-- GTIN-8 / UPC-E for compact labels.
-- GTIN-14 as a fallback for data sources that store zero-padded GTINs.
-
-Platform hints do not make a match by themselves. They validate and rank decoded codes using common prefixes such as Nintendo `045496`/`4902370`, PlayStation `711719`/`4948872`, Xbox `885370`/`889842`, Sega `010086`/`4974365`, Capcom `013388`, Electronic Arts `014633`, Activision `047875`, Ubisoft `008888`, Square Enix `662248`, Take-Two `710425`, Warner `883929`, and Limited Run `812303`; import identity still requires an exact cached barcode row.
-
-The `Cache Settings` web view lists all cached IGDB platforms first, then all uncached IGDB platforms alphabetically. Submitting checked platforms builds local metadata indexes for them.
+These files can contain uploaded photos, private library evidence, and derived cache data, so they should not be committed.
