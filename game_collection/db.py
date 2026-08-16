@@ -234,7 +234,9 @@ def list_collection(conn: sqlite3.Connection) -> Iterable[sqlite3.Row]:
 def plan_next(conn: sqlite3.Connection, *, limit: int = 20) -> Iterable[sqlite3.Row]:
     return conn.execute(
         """
-        SELECT collection_item_id, game_id, title, platform, acquisition_status, latest_play_status, cover_url
+        SELECT
+            collection_item_id, game_id, title, platform, acquisition_status,
+            latest_play_status, provider, provider_game_id, cover_url
         FROM collection_summary
         WHERE acquisition_status IN ('owned', 'would_sell')
           AND latest_play_status IN ('unplayed', 'playing')

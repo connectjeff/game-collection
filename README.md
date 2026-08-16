@@ -45,6 +45,14 @@ game-collection serve
 
 Then open http://127.0.0.1:8765.
 
+To use the app from an iPhone on the same network, bind the server to your LAN interface:
+
+```bash
+game-collection serve --host 0.0.0.0
+```
+
+Find the Mac's Ethernet or Wi-Fi IP address, then open `http://<your-ip>:8765` on the phone. In Safari, use Share -> Add to Home Screen. The web UI includes iOS Home Screen metadata, touch icons, safe-area spacing, mobile table labels, and a thumb-friendly bottom navigation bar when opened on a small screen.
+
 For metadata lookup:
 
 ```bash
@@ -119,25 +127,21 @@ Start the local interface:
 game-collection serve
 ```
 
-Open http://127.0.0.1:8765 and choose `Upload Photos`.
+Open http://127.0.0.1:8765 and choose `Scan`.
 
 ### 3. Upload and ingest
 
-Use the upload form to choose one or more photos directly from your computer or phone sync folder. The file picker supports selecting multiple images at once, and the importer processes every uploaded image in the request. You do not need to place files in `photos/incoming/` or manage review files yourself.
+Use the upload form to choose one back-cover barcode photo. On iOS, the native picker lets you select from the photo library or take a new picture with the camera. The web ingest workflow assumes one physical game per scan. You do not need to place files in `photos/incoming/` or manage review files yourself.
 
 Set:
 
-- metadata provider, usually `igdb`,
-- platform from the cached IGDB platform picklist,
-- expected title count from 1 to 30,
-- ownership status,
-- initial play status.
+- platform from the cached IGDB platform picklist.
+
+The web upload workflow uses IGDB metadata caches internally, so there is no provider selector on the upload form.
 
 The importer scans uploaded photos for barcodes and UPC/EAN codes. Exact matches come from a local ignored CSV at `review/barcodes/catalog.csv`. Use `examples/barcode-catalog.example.csv` as the format reference.
 
-The expected title count controls the initial review queue size. If barcode scanning finds fewer matches than expected, the review queue is padded with blank manual rows. If it finds more, the queue is capped to the expected count.
-
-Then click `Upload And Ingest`.
+Then tap `Scan`.
 
 Prioritized platform presets:
 
@@ -149,6 +153,8 @@ Prioritized platform presets:
 Use `Xbox Series X|S` for Xbox Series X games because that is the IGDB platform name used for cached metadata.
 
 The upload platform selector only shows platforms that already have local cached metadata. Use `Cache Settings` to choose platforms and build complete local indexes for title autocomplete and cover art display.
+
+If a newer game imports before IGDB has cover art, keep the game in the library and refresh it later from `Cache Settings` -> `Library Art` -> `Refresh`. That action re-queries IGDB for library games with missing cover URLs, downloads newly available cover art into the local platform cache, and updates the game metadata in `collection.sqlite3`.
 
 When the server starts, it caches the IGDB platform list and starts prebuilding complete cover-art indexes for the prioritized systems in the background. You can force a refresh with:
 
@@ -167,11 +173,12 @@ The web UI handles the choreography:
 - stores uploaded photos in an ignored local run folder,
 - scans uploaded photos for barcodes,
 - matches decoded codes against a local platform barcode cache,
+- falls back to live no-key barcode lookups when the local cache misses,
 - shows database cover art for barcode/title matches when cached metadata is available,
 - lets you correct the matched title from cached platform metadata,
 - imports only rows you manually accept.
 
-Barcode matches are treated as exact catalog matches. If no barcode is detected, or if a detected barcode is not in the local cache, the browser review page prompts for title and platform.
+Barcode matches are treated as exact code matches. The web workflow checks the local cache first, then tries public live lookup sources for the scanned UPC/EAN, including PriceCharting's public barcode redirect, upc.dev product lookup, and Open Products Facts. If no live source resolves the code, the browser review page prompts for title and platform.
 
 ### Barcode caches
 
@@ -294,31 +301,28 @@ The command runs the backend ingestion path without the web UI, using barcode sc
 
 Those files are ignored because they can reveal your real library. Commit only generic examples such as `examples/sample-expectations.example.json`.
 
-### 4. Review suggested matches
+### 4. Review the scanned match
 
 After upload, the browser redirects to an ingest results page.
 
 Check:
 
-- suggested match count,
 - uploaded photo thumbnails,
-- matched cover thumbnails,
+- matched database cover thumbnail,
 - matched title,
 - platform.
 
-No rows are imported automatically from photo upload.
+No game is imported automatically from photo upload.
 
-### 5. Accept or ignore rows in the browser
+### 5. Accept, change, or reject the match
 
-For each suggested row:
+The review page is optimized for one game:
 
-- confirm `platform`,
-- type in `matched_title` to overwrite the suggestion and search cached platform metadata,
-- choose the correct title to refresh the matched cover image,
-- click the accept icon to move it to the `Accepted` table,
-- click the ignore icon to move it to the `Ignored` table.
+- tap `Accept` to import the matched game,
+- tap `Edit` to focus the title field, then type and choose from cached metadata autocomplete,
+- tap `Reject` to keep the scan in the audit log without importing it.
 
-Click `Save And Import Accepted Rows`.
+Accepted games are imported as owned and unplayed by default. You can edit ownership and play history later from the game detail page.
 
 The web UI preserves an internal audit CSV under `review/web-ingests/`, but that folder is ignored and is not part of the normal workflow.
 
@@ -410,11 +414,11 @@ Open http://127.0.0.1:8765 and check:
 
 Click a game title to edit its metadata, update ownership, mark it as a sell candidate, mark it sold, or record play status.
 
-### 6. Plan what to play next
+### 6. Choose what to play next
 
-In the browser, open the `Plan Next` view.
+In the browser, use the `Library` view filters and shelves to focus on unplayed, playing, completed, owned, sold, or sell-candidate games. Tap a game to update ownership and play status; the library updates from those fields.
 
-Or use the CLI:
+The CLI still has a compact planning command:
 
 ```bash
 game-collection plan-next
@@ -443,9 +447,8 @@ The interface is local-only by default and uses `collection.sqlite3`.
 Available views:
 
 - `Library`: browse, search, and filter the full collection.
-- `Plan Next`: view owned games that are unplayed or currently being played.
-- `Upload Photos`: upload one or more back-cover photos, scan barcodes, and review barcode/manual rows.
-- `Cache Settings`: choose which IGDB platforms should have complete local metadata indexes for title autocomplete and cover art display. Cached platforms appear first, followed by uncached platforms alphabetically.
+- `Scan`: upload or take one back-cover photo, scan the barcode, and confirm one match.
+- `Cache`: choose which IGDB platforms should have complete local metadata indexes for title autocomplete and cover art display. Cached platforms appear first, followed by uncached platforms alphabetically.
 - `Game Detail`: edit metadata, ownership state, location/condition notes, sale notes, and play status.
 
 Useful edits:

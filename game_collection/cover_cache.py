@@ -226,3 +226,54 @@ def build_cover_index(
         entries = [entry for entry in executor.map(index_match, matches) if entry is not None]
     write_cover_index(index_path, entries)
     return entries
+
+
+def find_or_fetch_cover_entry_for_title(
+    *,
+    provider: MetadataProvider,
+    platform: str | None,
+    title: str,
+    index_path: Path,
+    existing_entries: list[CoverIndexEntry] | None = None,
+) -> CoverIndexEntry | None:
+    title_key = _normalize_title(title)
+    if not title_key:
+        return None
+
+    entries = existing_entries if existing_entries is not None else read_cover_index(index_path)
+    for entry in entries:
+        if _normalize_title(entry.title) == title_key:
+            return entry
+
+    if not isinstance(provider, IgdbProvider):
+        return None
+
+    covers_dir = index_path.parent / "covers"
+    matches = provider.search(title, platform=platform, limit=10)
+    for match in matches:
+        if _normalize_title(match.title) != title_key or not match.cover_url:
+            continue
+        cover_path = covers_dir / f"{match.provider_game_id}.jpg"
+        if not cover_path.exists() and not download_cover(match.cover_url, cover_path):
+            continue
+        entry = CoverIndexEntry(
+            provider=match.provider,
+            provider_game_id=match.provider_game_id,
+            title=match.title,
+            platform=match.platform or platform,
+            release_date=match.release_date,
+            developer=match.developer,
+            publisher=match.publisher,
+            description=match.description,
+            cover_url=match.cover_url,
+            cover_path=cover_path,
+        )
+        merged = [item for item in entries if item.provider_game_id != entry.provider_game_id]
+        merged.append(entry)
+        write_cover_index(index_path, merged)
+        return entry
+    return None
+
+
+def _normalize_title(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())

@@ -14,7 +14,7 @@ from game_collection import db
 from game_collection.barcode_match import BarcodeCatalogEntry
 from game_collection.cover_cache import CoverIndexEntry
 from game_collection.providers import GameMatch
-from game_collection.web import CollectionHandler, _fit_review_rows_to_expected_count
+from game_collection.web import CollectionHandler, _apply_cover_entry_to_row, _fit_review_rows_to_expected_count, _layout
 
 
 class FakeProvider:
@@ -33,7 +33,12 @@ class FakeProvider:
         ]
 
 
-def multipart_body(filenames: list[str] | None = None, *, expected_titles: int = 1) -> tuple[bytes, str]:
+def multipart_body(
+    filenames: list[str] | None = None,
+    *,
+    expected_titles: int = 1,
+    file_field: str = "photos",
+) -> tuple[bytes, str]:
     boundary = "----gamecollectiontest"
     filenames = filenames or ["games.jpg"]
     parts = [
@@ -62,7 +67,7 @@ def multipart_body(filenames: list[str] | None = None, *, expected_titles: int =
         parts.append(
             (
                 f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="photos"; filename="{filename}"\r\n'
+                f'Content-Disposition: form-data; name="{file_field}"; filename="{filename}"\r\n'
                 "Content-Type: image/jpeg\r\n\r\n"
             ).encode("utf-8")
             + f"fake image bytes for {filename}\r\n".encode("utf-8")
@@ -72,6 +77,43 @@ def multipart_body(filenames: list[str] | None = None, *, expected_titles: int =
 
 
 class WebIngestTests(unittest.TestCase):
+    def test_layout_includes_ios_home_screen_metadata(self) -> None:
+        page = _layout("Game Collection", "<h1>Library</h1>").decode("utf-8")
+
+        self.assertIn('name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"', page)
+        self.assertIn('name="apple-mobile-web-app-capable" content="yes"', page)
+        self.assertIn('rel="manifest" href="/app.webmanifest"', page)
+        self.assertIn('rel="apple-touch-icon" href="/apple-touch-icon.png"', page)
+        self.assertIn("installResponsiveTables", page)
+        self.assertIn("installServiceWorker", page)
+
+    def test_app_assets_are_served_for_mobile_home_screen(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "collection.sqlite3"
+            handler = type("TestCollectionHandler", (CollectionHandler,), {"db_path": db_path})
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/app.webmanifest", timeout=10) as response:
+                manifest = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(response.headers["Content-Type"], "application/manifest+json")
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/apple-touch-icon.png", timeout=10) as response:
+                icon = response.read()
+                icon_type = response.headers["Content-Type"]
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/service-worker.js", timeout=10) as response:
+                worker = response.read().decode("utf-8")
+
+        self.assertEqual(manifest["display"], "standalone")
+        self.assertEqual(manifest["start_url"], "/")
+        self.assertEqual(icon_type, "image/png")
+        self.assertTrue(icon.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertIn("CACHE_NAME", worker)
+
     def test_fit_review_rows_to_expected_count_pads_and_trims(self) -> None:
         rows = [{"matched_title": "One"}, {"matched_title": "Two"}]
 
@@ -170,6 +212,14 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn("Nintendo Switch", body)
         self.assertIn("filter-chip active", body)
 
+    def test_layout_omits_separate_plan_navigation(self) -> None:
+        page = _layout("Game Collection", "<h1>Library</h1>").decode("utf-8")
+
+        self.assertIn('href="/" aria-label="Library"', page)
+        self.assertIn('href="/ingest" aria-label="Scan a barcode"', page)
+        self.assertIn('href="/caches" aria-label="Cache settings"', page)
+        self.assertNotIn('href="/plan"', page)
+
     def test_upload_form_includes_only_cached_platforms(self) -> None:
         with patch("game_collection.web.platform_cache_statuses") as statuses:
             statuses.return_value = [
@@ -181,8 +231,42 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn('<option value="PlayStation 5">PlayStation 5</option>', body)
         self.assertNotIn('<option value="PlayStation 4">PlayStation 4</option>', body)
         self.assertNotIn("Cover index limit", body)
-        self.assertIn('name="expected_titles"', body)
-        self.assertIn('<option value="30">30</option>', body)
+        self.assertNotIn('name="expected_titles"', body)
+        self.assertNotIn("Expected titles", body)
+        self.assertNotIn("Ownership status", body)
+        self.assertNotIn("Initial play status", body)
+        self.assertIn('name="photos"', body)
+        self.assertIn('accept="image/*"', body)
+        self.assertNotIn("multiple required", body)
+        self.assertNotIn("Metadata provider", body)
+        self.assertNotIn('name="provider"', body)
+        self.assertNotIn('name="upload_mode"', body)
+        self.assertNotIn('name="photo_library"', body)
+        self.assertNotIn('name="camera_photo"', body)
+
+    def test_upload_form_selects_last_platform_cookie(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            handler = type("TestCollectionHandler", (CollectionHandler,), {"db_path": Path(tmp) / "collection.sqlite3"})
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/ingest",
+                headers={"Cookie": "game_collection_last_platform=PlayStation%205"},
+            )
+            with patch("game_collection.web.platform_cache_statuses") as statuses:
+                statuses.return_value = [
+                    type("Status", (), {"name": "Nintendo Switch", "cached": True, "count": 12})(),
+                    type("Status", (), {"name": "PlayStation 5", "cached": True, "count": 9})(),
+                ]
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    body = response.read().decode("utf-8")
+
+        self.assertIn('<option value="PlayStation 5" selected>PlayStation 5</option>', body)
+        self.assertNotIn('capture="environment"', body)
 
     def test_cache_settings_page_lists_platform_checkboxes(self) -> None:
         handler = type(
@@ -205,6 +289,62 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn('action="/barcode-sources"', body)
         self.assertIn('value="wikidata-video-games"', body)
         self.assertIn('value="csv-url"', body)
+        self.assertIn('action="/library-art-refresh"', body)
+        self.assertIn("Library Art", body)
+
+    def test_library_art_refresh_updates_games_missing_cover_art(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "collection.sqlite3"
+            db.init_db(db_path)
+            with db.connect(db_path) as conn:
+                game_id = db.upsert_game(
+                    conn,
+                    provider="igdb",
+                    provider_game_id="366878",
+                    title="Super Mario Galaxy + Super Mario Galaxy 2",
+                    platform="Nintendo Switch",
+                    cover_url=None,
+                )
+                db.add_collection_item(conn, game_id=game_id)
+            entry = CoverIndexEntry(
+                provider="igdb",
+                provider_game_id="366878",
+                title="Super Mario Galaxy + Super Mario Galaxy 2",
+                platform="Nintendo Switch",
+                release_date="2025-10-02",
+                developer="Nintendo Software Technology",
+                publisher="Nintendo",
+                description="Travel the stars with Mario.",
+                cover_url="https://images.igdb.com/igdb/image/upload/t_cover_big/coavv6.jpg",
+                cover_path=root / "covers" / "366878.jpg",
+            )
+            handler = type("TestCollectionHandler", (CollectionHandler,), {"db_path": db_path})
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/library-art-refresh",
+                data=b"",
+                method="POST",
+            )
+            with (
+                patch("game_collection.web.get_provider", return_value=FakeProvider()),
+                patch("game_collection.web.find_or_fetch_cover_entry_for_title", return_value=entry) as refresh,
+                patch("game_collection.web.platform_cache_statuses", return_value=[]),
+            ):
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    html = response.read().decode("utf-8")
+
+            with db.connect(db_path) as conn:
+                row = db.get_game_detail(conn, game_id=game_id)
+
+        self.assertIn("updated 1", html)
+        refresh.assert_called_once()
+        self.assertEqual(row["cover_url"], "https://images.igdb.com/igdb/image/upload/t_cover_big/coavv6.jpg")
 
     def test_barcode_source_post_downloads_and_rebuilds_caches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -275,7 +415,8 @@ class WebIngestTests(unittest.TestCase):
 
         self.assertIn("Uploaded", body)
         self.assertIn("Matched", body)
-        self.assertIn("wikidata | Q1 | 045496905651", body)
+        self.assertIn("Barcode: 045496905651", body)
+        self.assertNotIn("wikidata | Q1 | 045496905651", body)
         self.assertIn("review/cover-indexes/igdb/gamecube/covers/123.jpg", body)
         self.assertNotIn("<th>Notes</th>", body)
         self.assertNotIn("<th>Provider</th>", body)
@@ -292,17 +433,85 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn('select name="row_0_platform"', body)
         self.assertIn('value="Nintendo GameCube" selected', body)
         self.assertIn('value="PlayStation 5"', body)
-        self.assertIn("<th>Play Status</th>", body)
-        self.assertIn('select name="row_0_play_status"', body)
-        self.assertIn('value="completed" selected', body)
+        self.assertNotIn("<th>Play Status</th>", body)
+        self.assertIn('type="hidden" name="row_0_play_status" value="completed"', body)
         self.assertIn('data-modal-image="/media?path=review/web-ingests/run/crops/upload-001-001.jpg"', body)
-        self.assertIn('data-action-decision="accept"', body)
-        self.assertIn('data-action-decision="ignore"', body)
-        self.assertIn('data-role="decision-actions"', body)
-        self.assertNotIn('data-action-decision="review"', body)
-        self.assertIn("Review Queue", body)
-        self.assertIn("Accepted", body)
-        self.assertIn("Ignored", body)
+        self.assertIn('name="row_0_decision" value="accept"', body)
+        self.assertIn('name="row_0_decision" value="ignore"', body)
+        self.assertIn("Accept", body)
+        self.assertIn("Edit", body)
+        self.assertIn("Reject", body)
+        self.assertNotIn("Review Queue", body)
+        self.assertNotIn("Accepted", body)
+        self.assertNotIn("Ignored", body)
+
+    def test_apply_cover_entry_to_row_replaces_barcode_metadata(self) -> None:
+        row = {
+            "provider": "barcode",
+            "provider_game_id": "045496905651",
+            "candidate_title": "Super Mario Galaxy + Super Mario Galaxy 2",
+            "matched_title": "Super Mario Galaxy + Super Mario Galaxy 2",
+            "platform": "Nintendo Switch",
+            "barcode": "045496905651",
+            "notes": "barcode=045496905651; exact barcode catalog match",
+        }
+        entry = CoverIndexEntry(
+            provider="igdb",
+            provider_game_id="366878",
+            title="Super Mario Galaxy + Super Mario Galaxy 2",
+            platform="Nintendo Switch",
+            release_date="2025-10-02",
+            developer="Nintendo",
+            publisher="Nintendo",
+            description="Bundle",
+            cover_url="https://images.igdb.com/igdb/image/upload/t_cover_big/example.jpg",
+            cover_path=Path("review/cover-indexes/igdb/nintendo-switch/covers/366878.jpg"),
+        )
+
+        _apply_cover_entry_to_row(row, entry)
+
+        self.assertEqual(row["provider"], "igdb")
+        self.assertEqual(row["provider_game_id"], "366878")
+        self.assertEqual(row["cover_url"], entry.cover_url)
+        self.assertIn("cover_path=review/cover-indexes/igdb/nintendo-switch/covers/366878.jpg", row["notes"])
+
+    def test_review_table_uses_cached_exact_title_cover_for_barcode_row(self) -> None:
+        entry = CoverIndexEntry(
+            provider="igdb",
+            provider_game_id="366878",
+            title="Super Mario Galaxy + Super Mario Galaxy 2",
+            platform="Nintendo Switch",
+            release_date="2025-10-02",
+            developer="Nintendo",
+            publisher="Nintendo",
+            description="Bundle",
+            cover_url="https://images.igdb.com/igdb/image/upload/t_cover_big/example.jpg",
+            cover_path=Path("review/cover-indexes/igdb/nintendo-switch/covers/366878.jpg"),
+        )
+        with (
+            patch("game_collection.web.platform_cache_statuses") as statuses,
+            patch("game_collection.web._cached_cover_entries", return_value=[entry]),
+        ):
+            statuses.return_value = [
+                type("Status", (), {"name": "Nintendo Switch", "cached": True, "count": 1})(),
+            ]
+            body = CollectionHandler._review_rows_table(
+                CollectionHandler,
+                [
+                    {
+                        "provider": "barcode",
+                        "provider_game_id": "045496905651",
+                        "matched_title": "Super Mario Galaxy + Super Mario Galaxy 2",
+                        "platform": "Nintendo Switch",
+                        "barcode": "045496905651",
+                        "decision": "review",
+                    }
+                ],
+            )
+
+        self.assertIn("review/cover-indexes/igdb/nintendo-switch/covers/366878.jpg", body)
+        self.assertIn('name="row_0_provider" value="igdb"', body)
+        self.assertIn('name="row_0_provider_game_id" value="366878"', body)
 
     def test_review_platform_selector_preserves_uncached_current_platform(self) -> None:
         with patch("game_collection.web.platform_cache_statuses") as statuses:
@@ -324,22 +533,21 @@ class WebIngestTests(unittest.TestCase):
         self.assertIn('value="Nintendo GameCube" selected', body)
         self.assertIn('value="PlayStation 5"', body)
 
-    def test_manual_review_section_renders_even_without_detected_rows(self) -> None:
+    def test_single_review_card_renders_even_without_detected_rows(self) -> None:
         with patch("game_collection.web.platform_cache_statuses") as statuses:
             statuses.return_value = [
                 type("Status", (), {"name": "PlayStation 5", "cached": True, "count": 9})(),
             ]
             body = CollectionHandler._review_rows_table(CollectionHandler, [])
 
-        self.assertIn("Manual Review", body)
-        self.assertIn('data-role="manual-platform"', body)
-        self.assertIn('data-role="manual-title"', body)
-        self.assertIn('data-role="manual-add"', body)
-        self.assertIn('name="row_count" value="0"', body)
-        self.assertIn("Review Queue", body)
-        self.assertIn("No rows waiting for review.", body)
+        self.assertIn("single-review", body)
+        self.assertIn('name="row_count" value="1"', body)
+        self.assertIn('name="row_0_matched_title"', body)
+        self.assertIn("No barcode match found", body)
+        self.assertIn("Accept", body)
+        self.assertNotIn("Manual Review", body)
 
-    def test_ingest_results_shows_uploaded_photo_thumbnails(self) -> None:
+    def test_ingest_results_shows_uploaded_photo_once_in_review_card(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = root / "run-1"
@@ -347,7 +555,8 @@ class WebIngestTests(unittest.TestCase):
             uploads.mkdir(parents=True)
             (uploads / "upload-001.jpg").write_bytes(b"fake")
             (run_dir / "audit.csv").write_text(
-                "photo_path,crop_path,candidate_title,platform,play_status,provider,provider_game_id,matched_title,release_date,developer,publisher,description,cover_url,confidence,decision,notes\n",
+                "photo_path,crop_path,candidate_title,platform,play_status,provider,provider_game_id,matched_title,release_date,developer,publisher,description,cover_url,confidence,decision,notes\n"
+                "review/web-ingests/run-1/uploads/upload-001.jpg,review/web-ingests/run-1/uploads/upload-001.jpg,,PlayStation 5,unplayed,,,,,,,,,,review,\n",
                 encoding="utf-8",
             )
             (run_dir / "summary.csv").write_text("provider,igdb\nplatform,PlayStation 5\n", encoding="utf-8")
@@ -360,45 +569,9 @@ class WebIngestTests(unittest.TestCase):
                     handler = object.__new__(CollectionHandler)
                     body = handler._ingest_results("run-1")
 
-        self.assertIn("Uploaded Photos", body)
+        self.assertNotIn("Uploaded Photos", body)
         self.assertIn("upload-001.jpg", body)
-        self.assertIn("Manual Review", body)
-
-    def test_review_outcome_rows_have_section_specific_actions(self) -> None:
-        body = CollectionHandler._review_rows_table(
-            CollectionHandler,
-            [
-                {
-                    "photo_path": "photo.jpg",
-                    "crop_path": "crop.jpg",
-                    "candidate_title": "Accepted Game",
-                    "platform": "PlayStation 5",
-                    "provider": "igdb",
-                    "provider_game_id": "1",
-                    "matched_title": "Accepted Game",
-                    "decision": "accept",
-                },
-                {
-                    "photo_path": "photo.jpg",
-                    "crop_path": "crop.jpg",
-                    "candidate_title": "Ignored Game",
-                    "platform": "PlayStation 5",
-                    "provider": "igdb",
-                    "provider_game_id": "2",
-                    "matched_title": "Ignored Game",
-                    "decision": "ignore",
-                },
-            ],
-        )
-
-        accepted_row = body[body.index('data-row="0"'):body.index('data-row="1"')]
-        ignored_row = body[body.index('data-row="1"'):]
-        self.assertIn('data-action-decision="review"', accepted_row)
-        self.assertIn('data-action-decision="ignore"', accepted_row)
-        self.assertNotIn('data-action-decision="accept"', accepted_row)
-        self.assertIn('data-action-decision="review"', ignored_row)
-        self.assertIn('data-action-decision="accept"', ignored_row)
-        self.assertNotIn('data-action-decision="ignore"', ignored_row)
+        self.assertIn("single-review", body)
 
     def test_match_search_returns_cached_cover_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -443,6 +616,65 @@ class WebIngestTests(unittest.TestCase):
             self.assertEqual(matches[0]["title"], "Final Fantasy VII Remake")
             self.assertEqual(matches[0]["provider_game_id"], "456")
 
+    def test_accepting_ingest_review_redirects_to_scan_form(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "collection.sqlite3"
+            run_id = "run-1"
+            run_dir = root / run_id
+            run_dir.mkdir()
+            (run_dir / "audit.csv").write_text(
+                "photo_path,crop_path,candidate_title,platform,play_status,barcode,source_provider,source_id,provider,provider_game_id,matched_title,release_date,developer,publisher,description,cover_url,confidence,decision,notes\n",
+                encoding="utf-8",
+            )
+            (run_dir / "summary.csv").write_text("status,owned\nplayed,unplayed\n", encoding="utf-8")
+            handler = type("TestCollectionHandler", (CollectionHandler,), {"db_path": db_path})
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+
+            form = urllib.parse.urlencode(
+                {
+                    "row_count": "1",
+                    "row_0_provider": "igdb",
+                    "row_0_provider_game_id": "123",
+                    "row_0_matched_title": "Metroid Prime",
+                    "row_0_platform": "Nintendo GameCube",
+                    "row_0_decision": "accept",
+                    "row_0_play_status": "unplayed",
+                    "row_0_confidence": "1.00",
+                }
+            ).encode("utf-8")
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/ingest/{run_id}/review",
+                data=form,
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+
+            class NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+
+            opener = urllib.request.build_opener(NoRedirect)
+            with patch("game_collection.web.WEB_INGEST_ROOT", root):
+                try:
+                    opener.open(request, timeout=10)
+                except urllib.error.HTTPError as exc:
+                    status = exc.code
+                    location = exc.headers["Location"]
+                    cookie = exc.headers["Set-Cookie"]
+
+            with db.connect(db_path) as conn:
+                rows = list(db.list_collection(conn))
+
+        self.assertEqual(status, 303)
+        self.assertTrue(location.startswith("/ingest?message="))
+        self.assertIn("game_collection_last_platform=Nintendo%20GameCube", cookie)
+        self.assertEqual(len(rows), 1)
+
     def test_upload_ingest_creates_manual_review_suggestions_without_importing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -477,6 +709,7 @@ class WebIngestTests(unittest.TestCase):
                 cover_entries: list[CoverIndexEntry] | None = None,
                 barcode_entries=None,
                 accept_threshold: float = 0.92,
+                **kwargs,
             ):
                 return [
                     {
@@ -511,12 +744,13 @@ class WebIngestTests(unittest.TestCase):
                     html = response.read().decode("utf-8")
 
             self.assertIn("Ingest Results", html)
-            self.assertIn("suggested match", html)
+            self.assertIn("Review One Game", html)
+            self.assertIn("Accept", html)
             with db.connect(db_path) as conn:
                 rows = list(db.list_collection(conn))
             self.assertEqual(rows, [])
 
-    def test_upload_ingest_pads_review_queue_to_expected_title_count(self) -> None:
+    def test_upload_ingest_assumes_single_game_even_with_legacy_expected_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             db_path = root / "collection.sqlite3"
@@ -550,6 +784,7 @@ class WebIngestTests(unittest.TestCase):
                 cover_entries: list[CoverIndexEntry] | None = None,
                 barcode_entries=None,
                 accept_threshold: float = 0.92,
+                **kwargs,
             ):
                 return [
                     {
@@ -587,14 +822,14 @@ class WebIngestTests(unittest.TestCase):
                 with urllib.request.urlopen(request, timeout=10) as response:
                     html = response.read().decode("utf-8")
 
-            self.assertIn("<strong>3</strong> suggested match", html)
-            self.assertIn("Expected titles: 3 | Detected barcodes: 1", html)
-            self.assertIn('name="row_count" value="3"', html)
+            self.assertIn("Review One Game", html)
+            self.assertNotIn("Detected barcodes:", html)
+            self.assertIn('name="row_count" value="1"', html)
             self.assertIn('name="row_0_matched_title"', html)
-            self.assertIn('name="row_1_matched_title"', html)
-            self.assertIn('name="row_2_matched_title"', html)
+            self.assertNotIn('name="row_1_matched_title"', html)
+            self.assertNotIn('name="row_2_matched_title"', html)
             self.assertNotIn('name="row_3_matched_title"', html)
-            self.assertIn("Expected title placeholder", html)
+            self.assertNotIn("Expected title placeholder", html)
 
     def test_upload_ingest_passes_barcode_catalog_to_detector(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -622,6 +857,7 @@ class WebIngestTests(unittest.TestCase):
                 )
             ]
             seen_catalog_sizes: list[int] = []
+            seen_live_lookup: list[bool] = []
 
             def fake_detect(
                 *,
@@ -631,8 +867,10 @@ class WebIngestTests(unittest.TestCase):
                 cover_entries: list[CoverIndexEntry] | None = None,
                 barcode_entries=None,
                 accept_threshold: float = 0.92,
+                **kwargs,
             ):
                 seen_catalog_sizes.append(len(barcode_entries or []))
+                seen_live_lookup.append(bool(kwargs.get("live_lookup")))
                 return []
 
             body, content_type = multipart_body()
@@ -662,6 +900,56 @@ class WebIngestTests(unittest.TestCase):
                     response.read()
 
             self.assertEqual(seen_catalog_sizes, [1])
+            self.assertEqual(seen_live_lookup, [True])
+
+    def test_upload_ingest_remembers_selected_platform_cookie(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "collection.sqlite3"
+            handler = type("TestCollectionHandler", (CollectionHandler,), {"db_path": db_path})
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+
+            def fake_detect(**kwargs):
+                return []
+
+            body, content_type = multipart_body()
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/ingest",
+                data=body,
+                method="POST",
+                headers={"Content-Type": content_type},
+            )
+
+            class NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+
+            opener = urllib.request.build_opener(NoRedirect)
+            with (
+                patch("game_collection.web.WEB_INGEST_ROOT", root / "web-ingests"),
+                patch("game_collection.web.read_platform_barcode_cache", return_value=[]),
+                patch("game_collection.web.read_cover_index", return_value=[]),
+                patch("game_collection.web.detect_photo_candidates", side_effect=fake_detect),
+                patch("game_collection.web.get_provider", return_value=FakeProvider()),
+                patch("game_collection.web.platform_cache_statuses") as statuses,
+            ):
+                statuses.return_value = [
+                    type("Status", (), {"name": "Nintendo GameCube", "cached": True, "count": 9})(),
+                ]
+                try:
+                    opener.open(request, timeout=10)
+                except urllib.error.HTTPError as exc:
+                    status = exc.code
+                    location = exc.headers["Location"]
+                    cookie = exc.headers["Set-Cookie"]
+
+        self.assertEqual(status, 303)
+        self.assertTrue(location.startswith("/ingest/"))
+        self.assertIn("game_collection_last_platform=Nintendo%20GameCube", cookie)
 
     def test_upload_ingest_handles_multiple_images_in_one_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -697,6 +985,7 @@ class WebIngestTests(unittest.TestCase):
                 cover_entries: list[CoverIndexEntry] | None = None,
                 barcode_entries=None,
                 accept_threshold: float = 0.92,
+                **kwargs,
             ):
                 title = {
                     "upload-001.jpg": "Metroid Prime",
@@ -735,11 +1024,60 @@ class WebIngestTests(unittest.TestCase):
                 with urllib.request.urlopen(request, timeout=10) as response:
                     html = response.read().decode("utf-8")
 
-            self.assertIn("<strong>3</strong> suggested match", html)
+            self.assertIn("Review One Game", html)
+            self.assertIn('name="row_count" value="1"', html)
+            self.assertIn('name="row_0_matched_title"', html)
+            self.assertNotIn('name="row_1_matched_title"', html)
             self.assertEqual(detect.call_count, 3)
             with db.connect(db_path) as conn:
                 titles = [row["title"] for row in db.list_collection(conn)]
             self.assertEqual(titles, [])
+
+    def test_upload_ingest_accepts_camera_photo_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "collection.sqlite3"
+            handler = type("TestCollectionHandler", (CollectionHandler,), {"db_path": db_path})
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+
+            seen_uploads: list[str] = []
+
+            def fake_detect(
+                *,
+                photo_path: Path,
+                crops_dir: Path,
+                platform: str | None = None,
+                cover_entries: list[CoverIndexEntry] | None = None,
+                barcode_entries=None,
+                accept_threshold: float = 0.92,
+                **kwargs,
+            ):
+                seen_uploads.append(photo_path.name)
+                return []
+
+            body, content_type = multipart_body(["camera.jpg"], file_field="camera_photo")
+            url = f"http://127.0.0.1:{server.server_port}/ingest"
+            request = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": content_type})
+            with (
+                patch("game_collection.web.WEB_INGEST_ROOT", root / "web-ingests"),
+                patch("game_collection.web.read_platform_barcode_cache", return_value=[]),
+                patch("game_collection.web.read_cover_index", return_value=[]),
+                patch("game_collection.web.detect_photo_candidates", side_effect=fake_detect),
+                patch("game_collection.web.get_provider", return_value=FakeProvider()),
+                patch("game_collection.web.platform_cache_statuses") as statuses,
+            ):
+                statuses.return_value = [
+                    type("Status", (), {"name": "Nintendo GameCube", "cached": True, "count": 9})(),
+                ]
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    html = response.read().decode("utf-8")
+
+            self.assertIn("Ingest Results", html)
+            self.assertEqual(seen_uploads, ["upload-001.jpg"])
 
 
 if __name__ == "__main__":

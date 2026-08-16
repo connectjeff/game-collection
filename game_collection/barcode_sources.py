@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -11,6 +12,7 @@ from .barcode_match import (
     BarcodeCatalogEntry,
     _read_external_barcode_catalog_from_text,
     normalize_barcode,
+    normalize_platform_name,
     read_barcode_catalog,
     write_barcode_catalog,
 )
@@ -41,8 +43,8 @@ def download_wikidata_video_game_barcodes(
     query = f"""
 SELECT ?item ?itemLabel ?gtin ?platformLabel WHERE {{
   ?item wdt:P3962 ?gtin.
-  ?item wdt:P31 wd:Q7889.
   OPTIONAL {{ ?item wdt:P400 ?platform. }}
+  FILTER(EXISTS {{ ?item wdt:P31 wd:Q7889. }} || BOUND(?platform))
   SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
 }}
 {limit_clause}
@@ -141,6 +143,21 @@ def download_open_products_facts_products(
     return merged
 
 
+def lookup_live_barcode(barcode: str, *, platform: str | None = None) -> BarcodeCatalogEntry | None:
+    normalized = normalize_barcode(barcode)
+    if not normalized:
+        return None
+    for lookup in (
+        _lookup_pricecharting_redirect,
+        _lookup_upcdev_product,
+        _lookup_open_products_facts_product,
+    ):
+        entry = lookup(normalized, platform=platform)
+        if entry:
+            return entry
+    return None
+
+
 def download_csv_url(out_path: Path, *, url: str, incremental: bool = False) -> list[BarcodeCatalogEntry]:
     existing = read_barcode_catalog(out_path) if incremental and out_path.exists() else []
     entries = _read_external_barcode_catalog_from_text(_read_url_text(url))
@@ -218,6 +235,165 @@ def _upcdev_product_to_entry(product: dict[str, Any]) -> BarcodeCatalogEntry | N
         description=str(product.get("description") or "") or None,
         cover_url=str(product.get("image_url") or "") or None,
     )
+
+
+def _lookup_upcdev_product(barcode: str, *, platform: str | None = None) -> BarcodeCatalogEntry | None:
+    try:
+        payload = _get_json(f"{UPCDEV_BASE_URL}/product/{urllib.parse.quote(barcode)}")
+    except BarcodeSourceError:
+        return None
+    product = payload.get("data") or {}
+    entry = _upcdev_product_to_entry(product)
+    entry = _with_platform_fallback(entry, platform)
+    return entry if _is_likely_video_game_product(entry) else None
+
+
+def _lookup_open_products_facts_product(barcode: str, *, platform: str | None = None) -> BarcodeCatalogEntry | None:
+    try:
+        payload = _get_json(f"{OPEN_PRODUCTS_FACTS_BASE_URL}/product/{urllib.parse.quote(barcode)}.json")
+    except BarcodeSourceError:
+        return None
+    product = payload.get("product") or {}
+    title = product.get("product_name") or product.get("generic_name") or product.get("abbreviated_product_name")
+    if not title:
+        return None
+    entry = BarcodeCatalogEntry(
+        barcode=barcode,
+        title=str(title),
+        platform=_platform_from_text(" ".join(str(product.get(key) or "") for key in ("categories", "labels", "tags"))),
+        provider="openproductsfacts",
+        provider_game_id=barcode,
+        publisher=str(product.get("brands") or "") or None,
+        description=str(product.get("generic_name") or "") or None,
+        cover_url=str(product.get("image_front_url") or product.get("image_url") or "") or None,
+    )
+    entry = _with_platform_fallback(entry, platform)
+    return entry if _is_likely_video_game_product(entry) else None
+
+
+def _lookup_pricecharting_redirect(barcode: str, *, platform: str | None = None) -> BarcodeCatalogEntry | None:
+    url = f"https://www.pricecharting.com/search-products?{urllib.parse.urlencode({'type': 'videogames', 'q': barcode})}"
+    request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            location = response.geturl()
+    except urllib.error.HTTPError as exc:
+        location = exc.headers.get("Location") or ""
+    except OSError:
+        return None
+    parsed = urllib.parse.urlparse(location)
+    if "category=no-results" in location or "/game/" not in parsed.path:
+        return None
+    match = re.search(r"/game/([^/]+)/([^/?#]+)", parsed.path)
+    if not match:
+        return None
+    system_slug, title_slug = match.groups()
+    resolved_platform = _pricecharting_platform(system_slug) or normalize_platform_name(platform)
+    title = _title_from_slug(title_slug)
+    if not title:
+        return None
+    return BarcodeCatalogEntry(
+        barcode=barcode,
+        title=title,
+        platform=resolved_platform,
+        provider="pricecharting-public",
+        provider_game_id=location or barcode,
+    )
+
+
+def _with_platform_fallback(entry: BarcodeCatalogEntry | None, platform: str | None) -> BarcodeCatalogEntry | None:
+    if not entry:
+        return None
+    resolved_platform = normalize_platform_name(entry.platform) or normalize_platform_name(platform)
+    return BarcodeCatalogEntry(
+        barcode=entry.barcode,
+        title=entry.title,
+        platform=resolved_platform,
+        provider=entry.provider,
+        provider_game_id=entry.provider_game_id,
+        release_date=entry.release_date,
+        developer=entry.developer,
+        publisher=entry.publisher,
+        description=entry.description,
+        cover_url=entry.cover_url,
+    )
+
+
+def _is_likely_video_game_product(entry: BarcodeCatalogEntry | None) -> bool:
+    if not entry:
+        return False
+    text = " ".join(
+        value
+        for value in (
+            entry.title,
+            entry.platform or "",
+            entry.publisher or "",
+            entry.description or "",
+        )
+        if value
+    ).casefold()
+    hardware_terms = (
+        "console",
+        "controller",
+        "joy-con",
+        "joy con",
+        "headset",
+        "charging",
+        "dock",
+        "system",
+        "handheld play",
+        "memory card",
+        "amiibo",
+    )
+    if any(term in text for term in hardware_terms):
+        return False
+    game_terms = (
+        "video game",
+        "game",
+        "nintendo switch",
+        "playstation",
+        "ps4",
+        "ps5",
+        "xbox",
+        "wii",
+        "gamecube",
+    )
+    return any(term in text for term in game_terms)
+
+
+def _pricecharting_platform(slug: str) -> str | None:
+    aliases = {
+        "nintendo-switch": "Nintendo Switch",
+        "playstation-5": "PlayStation 5",
+        "playstation-4": "PlayStation 4",
+        "xbox-one": "Xbox One",
+        "xbox-series-x": "Xbox Series X|S",
+        "xbox-series-s": "Xbox Series X|S",
+        "nintendo-gamecube": "Nintendo GameCube",
+        "wii": "Wii",
+        "wii-u": "Wii U",
+        "nintendo-ds": "Nintendo DS",
+        "nintendo-3ds": "Nintendo 3DS",
+        "playstation-3": "PlayStation 3",
+        "playstation-2": "PlayStation 2",
+        "playstation-vita": "PlayStation Vita",
+    }
+    return aliases.get(slug.casefold())
+
+
+def _title_from_slug(slug: str) -> str:
+    words = urllib.parse.unquote(slug).replace("-", " ").split()
+    small_words = {"a", "an", "and", "for", "of", "or", "the", "to", "with"}
+    titled = []
+    for index, word in enumerate(words):
+        upper = word.upper()
+        if upper in {"ii", "iii", "iv", "vi", "vii", "viii", "ix", "x", "xl"}:
+            titled.append(upper)
+        elif index > 0 and word.casefold() in small_words:
+            titled.append(word.casefold())
+        else:
+            titled.append(word[:1].upper() + word[1:])
+    return " ".join(titled)
 
 
 def _platform_from_text(text: str) -> str | None:

@@ -107,6 +107,21 @@ PUBLISHER_COLUMN_ALIASES = ("publisher", "publishers")
 DEVELOPER_COLUMN_ALIASES = ("developer", "developers")
 COVER_URL_COLUMN_ALIASES = ("cover_url", "cover-url", "image", "image-url", "image_url")
 
+PLATFORM_NAME_ALIASES = {
+    "xbox series x and series s": "Xbox Series X|S",
+    "xbox series x/s": "Xbox Series X|S",
+    "xbox series x|s": "Xbox Series X|S",
+    "playstation 4": "PlayStation 4",
+    "playstation 5": "PlayStation 5",
+    "playstation 3": "PlayStation 3",
+    "playstation vita": "PlayStation Vita",
+    "nintendo switch": "Nintendo Switch",
+    "nintendo gamecube": "Nintendo GameCube",
+    "nintendo ds": "Nintendo DS",
+    "nintendo 3ds": "Nintendo 3DS",
+    "wii u": "Wii U",
+}
+
 
 def platform_barcode_hint(platform: str | None) -> BarcodeFormatHint:
     normalized = (platform or "").casefold()
@@ -172,6 +187,13 @@ def default_barcode_cache_path(platform: str | None) -> Path:
     return BARCODE_CATALOG_PATH
 
 
+def normalize_platform_name(value: str | None) -> str | None:
+    platform = (value or "").strip()
+    if not platform:
+        return None
+    return PLATFORM_NAME_ALIASES.get(platform.casefold(), platform)
+
+
 def read_barcode_catalog(path: Path = BARCODE_CATALOG_PATH) -> list[BarcodeCatalogEntry]:
     if not path.exists():
         return []
@@ -181,7 +203,7 @@ def read_barcode_catalog(path: Path = BARCODE_CATALOG_PATH) -> list[BarcodeCatal
             BarcodeCatalogEntry(
                 barcode=normalize_barcode(row.get("barcode", "")),
                 title=row.get("title", ""),
-                platform=row.get("platform") or None,
+                platform=normalize_platform_name(row.get("platform")),
                 provider=row.get("provider") or None,
                 provider_game_id=row.get("provider_game_id") or None,
                 release_date=row.get("release_date") or None,
@@ -314,7 +336,7 @@ def _read_external_barcode_catalog_from_rows(rows: Iterable[dict[str, str]]) -> 
             BarcodeCatalogEntry(
                 barcode=barcode,
                 title=title,
-                platform=_first_value(normalized_row, PLATFORM_COLUMN_ALIASES).strip() or None,
+                platform=normalize_platform_name(_first_value(normalized_row, PLATFORM_COLUMN_ALIASES)),
                 provider=_first_value(normalized_row, PROVIDER_COLUMN_ALIASES).strip() or None,
                 provider_game_id=_first_value(normalized_row, PROVIDER_ID_COLUMN_ALIASES).strip() or None,
                 release_date=_first_value(normalized_row, RELEASE_DATE_COLUMN_ALIASES).strip() or None,
@@ -427,8 +449,8 @@ def match_barcode(
         return None
     entry = candidates[0]
     indexed = _cover_entry_for_catalog_entry(entry, cover_entries or [])
-    provider = entry.provider or (indexed.provider if indexed else "barcode")
-    provider_game_id = entry.provider_game_id or (indexed.provider_game_id if indexed else normalize_barcode(barcode))
+    provider = indexed.provider if indexed else entry.provider or "barcode"
+    provider_game_id = indexed.provider_game_id if indexed else entry.provider_game_id or normalize_barcode(barcode)
     cover_url = entry.cover_url or (indexed.cover_url if indexed else None)
     return GameMatch(
         provider=provider,
@@ -446,6 +468,7 @@ def match_barcode(
             "match_type": "barcode",
             "source_provider": entry.provider or "local-barcode-cache",
             "source_id": entry.provider_game_id or entry.barcode,
+            "cover_index_path": str(indexed.cover_path) if indexed else "",
         },
     )
 

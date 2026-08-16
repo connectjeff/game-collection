@@ -6,9 +6,11 @@ import mimetypes
 import html
 import re
 import sqlite3
+import struct
 import threading
 import uuid
 import urllib.parse
+import zlib
 from email.parser import BytesParser
 from functools import lru_cache
 from http import HTTPStatus
@@ -33,6 +35,7 @@ from .cover_cache import (
     build_cover_index,
     build_platform_cache,
     default_index_path,
+    find_or_fetch_cover_entry_for_title,
     platform_cache_statuses,
     prebuild_prioritized_cover_indexes,
     read_cover_index,
@@ -44,12 +47,15 @@ from .review import INTAKE_FIELDS, read_review, write_review
 
 OWNERSHIP_STATUSES = ["owned", "would_sell", "sold", "loaned", "wishlist"]
 PLAY_STATUSES = ["unplayed", "playing", "completed", "retired"]
-PROVIDER_CHOICES = ["igdb"]
+DEFAULT_PROVIDER = "igdb"
 EXPECTED_TITLE_COUNTS = list(range(1, 31))
 PLATFORM_PRESETS = PRIORITIZED_PLATFORMS
 WEB_INGEST_ROOT = Path("review/web-ingests")
 BARCODE_SOURCE_ROOT = Path("review/barcode-sources")
 AUTOCOMPLETE_LIMIT = 25
+APP_ICON_BG = (12, 107, 88, 255)
+APP_ICON_FG = (248, 250, 252, 255)
+LAST_PLATFORM_COOKIE = "game_collection_last_platform"
 
 
 def _h(value: Any) -> str:
@@ -58,6 +64,14 @@ def _h(value: Any) -> str:
 
 def _selected(left: str | None, right: str) -> str:
     return " selected" if left == right else ""
+
+
+def _cookie_value(header: str | None, name: str) -> str:
+    for part in (header or "").split(";"):
+        key, _, value = part.strip().partition("=")
+        if key == name:
+            return urllib.parse.unquote(value)
+    return ""
 
 
 def _blank_review_row(*, platform: str | None, play_status: str | None, note: str) -> dict[str, str]:
@@ -175,6 +189,16 @@ def _autocomplete_matches(*, provider: str, platform: str, query: str, limit: in
     return [entry for _, _, entry in scored[:limit]]
 
 
+def _cached_exact_cover_entry(*, provider: str, platform: str, title: str) -> CoverIndexEntry | None:
+    title_key = _normalize_title(title)
+    if not title_key or not platform:
+        return None
+    for entry in _cached_cover_entries(provider, platform):
+        if _normalize_title(entry.title) == title_key:
+            return entry
+    return None
+
+
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -235,9 +259,30 @@ def _matched_cover_path(row: dict[str, str]) -> str:
             return str(indexed_cover)
     notes = row.get("notes", "")
     marker = "cover_path="
-    if marker not in notes:
+    if marker in notes:
+        return notes.split(marker, 1)[1].split(";", 1)[0].strip()
+    try:
+        raw = json.loads(notes)
+    except (TypeError, ValueError):
         return ""
-    return notes.split(marker, 1)[1].split(";", 1)[0].strip()
+    return str(raw.get("cover_index_path") or "")
+
+
+def _apply_cover_entry_to_row(row: dict[str, str], entry: CoverIndexEntry) -> None:
+    row["provider"] = entry.provider
+    row["provider_game_id"] = entry.provider_game_id
+    row["matched_title"] = entry.title
+    row["candidate_title"] = row.get("candidate_title") or entry.title
+    row["platform"] = entry.platform or row.get("platform") or ""
+    row["release_date"] = entry.release_date or ""
+    row["developer"] = entry.developer or ""
+    row["publisher"] = entry.publisher or ""
+    row["description"] = entry.description or ""
+    row["cover_url"] = entry.cover_url or ""
+    row["notes"] = (row.get("notes") or "").rstrip("; ")
+    cover_note = f"cover_path={entry.cover_path}"
+    if cover_note not in row["notes"]:
+        row["notes"] = f"{row['notes']}; {cover_note}" if row["notes"] else cover_note
 
 
 def _row_value(row: Any, key: str, default: str = "") -> str:
@@ -296,6 +341,162 @@ def _chip(label: str, *, active: bool = False, **params: str) -> str:
     )
 
 
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+
+@lru_cache(maxsize=4)
+def _app_icon_png(size: int = 180) -> bytes:
+    def blend(a: tuple[int, int, int, int], b: tuple[int, int, int, int], amount: float) -> tuple[int, int, int, int]:
+        return tuple(int(a[index] + (b[index] - a[index]) * amount) for index in range(4))  # type: ignore[return-value]
+
+    def rounded_rect(x: int, y: int, left: float, top: float, right: float, bottom: float, radius: float) -> bool:
+        if left + radius <= x <= right - radius and top <= y <= bottom:
+            return True
+        if left <= x <= right and top + radius <= y <= bottom - radius:
+            return True
+        for cx, cy in (
+            (left + radius, top + radius),
+            (right - radius, top + radius),
+            (left + radius, bottom - radius),
+            (right - radius, bottom - radius),
+        ):
+            if (x - cx) ** 2 + (y - cy) ** 2 <= radius**2:
+                return True
+        return False
+
+    def triangle(x: int, y: int, points: tuple[tuple[float, float], tuple[float, float], tuple[float, float]]) -> bool:
+        (x1, y1), (x2, y2), (x3, y3) = points
+        denominator = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3)
+        a = ((y2 - y3) * (x - x3) + (x3 - x2) * (y - y3)) / denominator
+        b = ((y3 - y1) * (x - x3) + (x1 - x3) * (y - y3)) / denominator
+        c = 1 - a - b
+        return a >= 0 and b >= 0 and c >= 0
+
+    barcode_lines = (0.31, 0.34, 0.39, 0.43, 0.47, 0.52, 0.57, 0.61, 0.66, 0.70)
+    pixels = bytearray()
+    card_left = size * 0.18
+    card_top = size * 0.12
+    card_right = size * 0.82
+    card_bottom = size * 0.88
+    card_radius = size * 0.055
+    shadow_left = card_left + size * 0.035
+    shadow_top = card_top + size * 0.035
+    shadow_right = card_right + size * 0.035
+    shadow_bottom = card_bottom + size * 0.035
+    play_points = (
+        (size * 0.43, size * 0.43),
+        (size * 0.43, size * 0.59),
+        (size * 0.59, size * 0.51),
+    )
+    for y in range(size):
+        pixels.append(0)
+        for x in range(size):
+            vertical = y / max(size - 1, 1)
+            horizontal = x / max(size - 1, 1)
+            color = blend((17, 24, 32, 255), APP_ICON_BG, min(0.62, vertical * 0.72 + horizontal * 0.12))
+            if (x - size * 0.23) ** 2 + (y - size * 0.09) ** 2 < (size * 0.24) ** 2:
+                color = blend(color, (55, 132, 170, 255), 0.22)
+            if rounded_rect(x, y, shadow_left, shadow_top, shadow_right, shadow_bottom, card_radius):
+                color = blend(color, (0, 0, 0, 255), 0.22)
+            if rounded_rect(x, y, card_left, card_top, card_right, card_bottom, card_radius):
+                relative_y = (y - card_top) / (card_bottom - card_top)
+                color = blend((248, 250, 252, 255), (213, 229, 235, 255), max(0, min(1, relative_y)))
+            if rounded_rect(x, y, card_left, card_top, card_right, card_bottom, card_radius) and y < size * 0.28:
+                color = blend((14, 77, 124, 255), (20, 142, 121, 255), horizontal)
+            if card_left < x < card_right and size * 0.31 < y < size * 0.37:
+                color = blend(color, (205, 46, 68, 255), 0.88)
+            if triangle(x, y, play_points):
+                color = (17, 24, 32, 255)
+            if size * 0.31 < y < size * 0.72:
+                for index, line_x in enumerate(barcode_lines):
+                    width = size * (0.012 if index % 3 else 0.018)
+                    if abs(x - size * line_x) < width:
+                        color = blend(color, (17, 24, 32, 255), 0.82)
+            if size * 0.70 < y < size * 0.74 and card_left + size * 0.07 < x < card_right - size * 0.07:
+                color = blend(color, (17, 24, 32, 255), 0.72)
+            if rounded_rect(x, y, card_left, card_top, card_right, card_bottom, card_radius):
+                near_edge = (
+                    abs(x - card_left) < size * 0.012
+                    or abs(x - card_right) < size * 0.012
+                    or abs(y - card_top) < size * 0.012
+                    or abs(y - card_bottom) < size * 0.012
+                )
+                if near_edge:
+                    color = blend(color, (255, 255, 255, 255), 0.36)
+            pixels.extend(color)
+    compressed = zlib.compress(bytes(pixels), level=9)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+        + _png_chunk(b"IDAT", compressed)
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def _app_manifest() -> bytes:
+    return json.dumps(
+        {
+            "name": "Game Collection",
+            "short_name": "Games",
+            "description": "Local physical video game library manager.",
+            "start_url": "/",
+            "scope": "/",
+            "display": "standalone",
+            "background_color": "#111820",
+            "theme_color": "#0c6b58",
+            "orientation": "any",
+            "icons": [
+                {"src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png"},
+                {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+            ],
+        },
+        ensure_ascii=True,
+    ).encode("utf-8")
+
+
+def _service_worker() -> bytes:
+    return b"""const CACHE_NAME = "game-collection-shell-v1";
+const SHELL_URLS = ["/", "/ingest", "/caches", "/app.webmanifest", "/apple-touch-icon.png"];
+
+self.addEventListener("install", (event) => {
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL_URLS)));
+  self.skipWaiting();
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    caches.keys().then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))))
+  );
+  self.clients.claim();
+});
+
+self.addEventListener("fetch", (event) => {
+  if (event.request.method !== "GET") return;
+  event.respondWith(
+    fetch(event.request)
+      .then((response) => {
+        const clone = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+        return response;
+      })
+      .catch(() => caches.match(event.request))
+  );
+});
+"""
+
+
+def _simple_page(kicker: str, title: str, message: str) -> str:
+    return f"""
+<div class="app-page">
+  <section class="page-hero">
+    <div class="page-kicker">{_h(kicker)}</div>
+    <h1 class="page-title">{_h(title)}</h1>
+    <p class="page-subtitle">{_h(message)}</p>
+  </section>
+</div>"""
+
+
 def _handler_type(handler: Any) -> Any:
     return handler if isinstance(handler, type) else type(handler)
 
@@ -305,7 +506,14 @@ def _layout(title: str, body: str) -> bytes:
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0c6b58">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Games">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="/app.webmanifest">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="icon" href="/icon-512.png">
   <title>{_h(title)}</title>
   <style>
     :root {{
@@ -320,35 +528,84 @@ def _layout(title: str, body: str) -> bytes:
       --warn: #9b4f00;
     }}
     * {{ box-sizing: border-box; }}
+    html {{
+      min-height: 100%;
+      -webkit-text-size-adjust: 100%;
+    }}
     body {{
       margin: 0;
-      background: var(--bg);
+      background:
+        radial-gradient(circle at 18% 0%, rgba(12, 107, 88, 0.22), transparent 34%),
+        linear-gradient(180deg, #111820 0%, #172029 42%, #f6f7f9 100%);
       color: var(--text);
       font: 15px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      min-height: 100%;
+      padding-top: env(safe-area-inset-top);
+      -webkit-tap-highlight-color: rgba(12, 107, 88, 0.18);
     }}
     header {{
-      background: var(--panel);
-      border-bottom: 1px solid var(--line);
-      padding: 14px 24px;
+      background: rgba(17, 24, 32, 0.92);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 14px max(24px, env(safe-area-inset-right)) 14px max(24px, env(safe-area-inset-left));
       display: flex;
       align-items: center;
       gap: 18px;
       position: sticky;
       top: 0;
       z-index: 2;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      backdrop-filter: blur(16px);
     }}
     header a {{
-      color: var(--accent);
+      color: #eff6f4;
       font-weight: 700;
       text-decoration: none;
+      min-height: 40px;
+      display: inline-flex;
+      align-items: center;
+      white-space: nowrap;
     }}
     main {{
       max-width: 1180px;
       margin: 0 auto;
-      padding: 24px;
+      padding: 24px max(24px, env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left));
     }}
     h1 {{ font-size: 24px; margin: 0 0 18px; }}
     h2 {{ font-size: 18px; margin: 28px 0 12px; }}
+    .app-page {{
+      margin: -24px;
+      min-height: calc(100vh - 53px);
+      padding: 22px max(24px, calc((100vw - 1180px) / 2 + 24px)) calc(40px + env(safe-area-inset-bottom));
+      color: #f8fafc;
+    }}
+    .page-hero {{
+      margin: 0 0 18px;
+      max-width: 820px;
+    }}
+    .page-kicker {{
+      color: #9bd6c9;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }}
+    .page-title {{
+      margin: 0;
+      color: #f8fafc;
+      font-size: 30px;
+      line-height: 1.08;
+    }}
+    .page-subtitle {{
+      max-width: 760px;
+      margin: 8px 0 0;
+      color: #c8d3dd;
+    }}
+    .page-stack {{
+      display: grid;
+      gap: 16px;
+    }}
     form.filters {{
       display: grid;
       grid-template-columns: minmax(180px, 1fr) 170px 170px auto;
@@ -364,12 +621,13 @@ def _layout(title: str, body: str) -> bytes:
       background: #fff;
       color: var(--text);
       font: inherit;
+      font-size: 16px;
     }}
     textarea {{ min-height: 130px; resize: vertical; }}
     label {{ display: grid; gap: 5px; color: var(--muted); font-size: 13px; }}
     button, .button {{
       border: 0;
-      border-radius: 6px;
+      border-radius: 8px;
       background: var(--accent);
       color: #fff;
       padding: 10px 14px;
@@ -377,18 +635,49 @@ def _layout(title: str, body: str) -> bytes:
       text-decoration: none;
       cursor: pointer;
       white-space: nowrap;
+      min-height: 48px;
+      touch-action: manipulation;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
     }}
     .button.secondary, button.secondary {{
       background: #e7ebef;
       color: var(--text);
     }}
+    .button-icon {{
+      font-size: 17px;
+      line-height: 1;
+    }}
+    input[type="file"] {{
+      min-height: 54px;
+      padding: 7px;
+    }}
+    input[type="file"]::file-selector-button {{
+      min-height: 40px;
+      margin-right: 10px;
+      border: 0;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      font: inherit;
+      font-weight: 800;
+      padding: 8px 12px;
+    }}
+    input[type="checkbox"] {{
+      width: 24px;
+      height: 24px;
+      accent-color: var(--accent);
+    }}
     table {{
       width: 100%;
       border-collapse: collapse;
-      background: var(--panel);
-      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.96);
+      border: 1px solid rgba(255, 255, 255, 0.18);
       border-radius: 8px;
       overflow: hidden;
+      box-shadow: 0 18px 38px rgba(0, 0, 0, 0.16);
     }}
     th, td {{
       padding: 10px 12px;
@@ -402,7 +691,7 @@ def _layout(title: str, body: str) -> bytes:
     .library-shell {{
       margin: -24px;
       min-height: calc(100vh - 53px);
-      padding: 22px 0 38px;
+      padding: 22px 0 calc(38px + env(safe-area-inset-bottom));
       background:
         radial-gradient(circle at 18% 0%, rgba(12, 107, 88, 0.24), transparent 34%),
         linear-gradient(180deg, #111820 0%, #172029 42%, #f6f7f9 100%);
@@ -624,10 +913,15 @@ def _layout(title: str, body: str) -> bytes:
       padding: 16px;
     }}
     .panel {{
-      background: var(--panel);
-      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.96);
+      border: 1px solid rgba(255, 255, 255, 0.18);
       border-radius: 8px;
       padding: 18px;
+      color: var(--text);
+      box-shadow: 0 18px 38px rgba(0, 0, 0, 0.16);
+    }}
+    .panel h2:first-child {{
+      margin-top: 0;
     }}
     .grid {{
       display: grid;
@@ -637,12 +931,14 @@ def _layout(title: str, body: str) -> bytes:
     .actions {{ display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }}
     .muted {{ color: var(--muted); }}
     .notice {{
-      border: 1px solid var(--line);
+      border: 1px solid rgba(255, 255, 255, 0.18);
       border-left: 4px solid var(--accent);
-      background: #fff;
+      background: rgba(255, 255, 255, 0.96);
+      color: var(--text);
       padding: 12px 14px;
       border-radius: 6px;
       margin-bottom: 16px;
+      box-shadow: 0 18px 38px rgba(0, 0, 0, 0.14);
     }}
     .notice.error {{ border-left-color: #b3261e; }}
     .upload-panel {{
@@ -683,6 +979,40 @@ def _layout(title: str, body: str) -> bytes:
       margin-top: 12px;
       color: var(--muted);
     }}
+    .single-review {{
+      display: grid;
+      grid-template-columns: minmax(180px, 280px) minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+    }}
+    .single-review-covers {{
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }}
+    .single-review .crop-thumb {{
+      width: 118px;
+      height: 154px;
+    }}
+    .single-review-fields {{
+      display: grid;
+      gap: 12px;
+    }}
+    .single-review-actions {{
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }}
+    .single-review-actions button, .single-review-actions .button {{
+      flex: 1 1 116px;
+      justify-content: center;
+      text-align: center;
+    }}
+    .single-review-actions .reject {{
+      background: #ece3db;
+      color: var(--warn);
+    }}
     .review-table input, .review-table select {{
       min-width: 0;
     }}
@@ -710,8 +1040,8 @@ def _layout(title: str, body: str) -> bytes:
       justify-content: flex-end;
     }}
     .icon-button {{
-      width: 34px;
-      height: 34px;
+      width: 44px;
+      height: 44px;
       display: inline-grid;
       place-items: center;
       padding: 0;
@@ -733,13 +1063,18 @@ def _layout(title: str, body: str) -> bytes:
     }}
     .outcome-section {{
       margin-top: 22px;
+      color: #f8fafc;
+    }}
+    .outcome-section h2 {{
+      color: #f8fafc;
     }}
     .empty-state {{
-      background: var(--panel);
-      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.96);
+      border: 1px solid rgba(255, 255, 255, 0.18);
       border-radius: 8px;
       color: var(--muted);
       padding: 14px;
+      box-shadow: 0 18px 38px rgba(0, 0, 0, 0.14);
     }}
     .empty-state[hidden] {{ display: none; }}
     .match-control {{
@@ -834,11 +1169,61 @@ def _layout(title: str, body: str) -> bytes:
       text-transform: uppercase;
     }}
     @media (max-width: 760px) {{
-      header, main {{ padding-left: 14px; padding-right: 14px; }}
+      body {{ padding-bottom: calc(64px + env(safe-area-inset-bottom)); }}
+      header {{
+        position: fixed;
+        top: auto;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        justify-content: space-between;
+        gap: 6px;
+        padding: 8px max(10px, env(safe-area-inset-right)) calc(8px + env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left));
+        border-top: 1px solid var(--line);
+        border-bottom: 0;
+        box-shadow: 0 -8px 24px rgba(20, 31, 42, 0.12);
+      }}
+      header a {{
+        flex: 1 1 0;
+        justify-content: center;
+        min-width: 0;
+        min-height: 46px;
+        border-radius: 8px;
+        background: #f1f4f6;
+        color: #26313b;
+        font-size: 12px;
+        text-align: center;
+        padding: 4px 6px;
+      }}
+      header a:first-child {{ font-size: 0; }}
+      header a:first-child::after {{
+        content: "Library";
+        font-size: 12px;
+      }}
+      .page-subtitle {{
+        font-size: 13px;
+        line-height: 1.35;
+      }}
+      main {{
+        padding-left: max(14px, env(safe-area-inset-left));
+        padding-right: max(14px, env(safe-area-inset-right));
+        padding-bottom: 20px;
+      }}
+      .app-page {{
+        margin-left: -14px;
+        margin-right: -14px;
+        margin-top: -24px;
+        min-height: calc(100vh - 64px);
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-bottom: 20px;
+      }}
+      .page-title {{ font-size: 25px; }}
       .library-shell {{
         margin-left: -14px;
         margin-right: -14px;
         margin-top: -24px;
+        min-height: calc(100vh - 64px);
       }}
       .library-hero {{ padding-left: 16px; padding-right: 16px; }}
       .library-title {{ font-size: 25px; }}
@@ -852,11 +1237,23 @@ def _layout(title: str, body: str) -> bytes:
         padding-left: 16px;
         padding-right: 16px;
       }}
-      form.filters, .detail, .grid, .ingest-summary-grid, .manual-review-form {{ grid-template-columns: 1fr; }}
+      form.filters, .detail, .grid, .ingest-summary-grid, .manual-review-form, .single-review {{ grid-template-columns: 1fr; }}
       table, thead, tbody, tr, th, td {{ display: block; }}
       thead {{ display: none; }}
       tr {{ border-bottom: 1px solid var(--line); padding: 8px 0; }}
-      td {{ border: 0; padding: 5px 12px; }}
+      td {{
+        border: 0;
+        padding: 7px 12px;
+      }}
+      td[data-label]::before {{
+        content: attr(data-label);
+        display: block;
+        margin-bottom: 3px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }}
       .review-table tr {{
         background: var(--panel);
         border: 1px solid var(--line);
@@ -866,7 +1263,23 @@ def _layout(title: str, body: str) -> bytes:
       .review-table td {{
         padding: 8px 12px;
       }}
+      .decision-actions {{ justify-content: flex-start; }}
       .cover-pair {{ min-width: 0; }}
+      .actions button, .actions .button {{
+        flex: 1 1 96px;
+      }}
+      .single-review-actions {{
+        position: sticky;
+        bottom: calc(70px + env(safe-area-inset-bottom));
+        z-index: 3;
+        padding: 8px;
+        margin-left: -8px;
+        margin-right: -8px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.94);
+        box-shadow: 0 -8px 24px rgba(20, 31, 42, 0.14);
+      }}
     }}
   </style>
   <script>
@@ -1279,21 +1692,51 @@ def _layout(title: str, body: str) -> bytes:
       }});
     }}
 
+    function installResponsiveTables() {{
+      document.querySelectorAll("table").forEach((table) => {{
+        const labels = Array.from(table.querySelectorAll("thead th")).map((header) => header.textContent.trim());
+        table.querySelectorAll("tbody tr").forEach((row) => {{
+          Array.from(row.children).forEach((cell, index) => {{
+            if (labels[index]) cell.dataset.label = labels[index];
+          }});
+        }});
+      }});
+    }}
+
+    function installChangeMatchButtons() {{
+      document.querySelectorAll("[data-role='change-match']").forEach((button) => {{
+        button.addEventListener("click", () => {{
+          const input = document.querySelector("[data-role='match-title-input']");
+          if (!input) return;
+          input.focus();
+          input.select();
+          loadMatches(input);
+        }});
+      }});
+    }}
+
+    function installServiceWorker() {{
+      if (!("serviceWorker" in navigator) || !window.isSecureContext) return;
+      navigator.serviceWorker.register("/service-worker.js").catch(() => {{}});
+    }}
+
     document.addEventListener("DOMContentLoaded", () => {{
+      installResponsiveTables();
       installMatchInputs();
       installPlatformSelectors();
       installManualReview();
       installDecisionActions();
       installImageModal();
+      installChangeMatchButtons();
+      installServiceWorker();
     }});
   </script>
 </head>
 <body>
-  <header>
-    <a href="/">Game Collection</a>
-    <a href="/plan">Plan Next</a>
-    <a href="/ingest">Upload Photos</a>
-    <a href="/caches">Cache Settings</a>
+  <header aria-label="Primary navigation">
+    <a href="/" aria-label="Library">Library</a>
+    <a href="/ingest" aria-label="Scan a barcode">Scan</a>
+    <a href="/caches" aria-label="Cache settings">Cache</a>
   </header>
   <main>{body}</main>
 </body>
@@ -1316,10 +1759,40 @@ class CollectionHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def _send_bytes(
+        self,
+        payload: bytes,
+        *,
+        content_type: str,
+        cache_control: str = "public, max-age=86400",
+        status: HTTPStatus = HTTPStatus.OK,
+    ) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", cache_control)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
     def _redirect(self, path: str) -> None:
         self.send_response(HTTPStatus.SEE_OTHER)
         self.send_header("Location", path)
         self.end_headers()
+
+    def _redirect_remembering_platform(self, path: str, platform: str) -> None:
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", path)
+        self._remember_platform(platform)
+        self.end_headers()
+
+    def _last_platform(self) -> str:
+        return _cookie_value(self.headers.get("Cookie"), LAST_PLATFORM_COOKIE)
+
+    def _remember_platform(self, platform: str) -> None:
+        self.send_header(
+            "Set-Cookie",
+            f"{LAST_PLATFORM_COOKIE}={urllib.parse.quote(platform)}; Path=/; SameSite=Lax; Max-Age=31536000",
+        )
 
     def _form(self) -> dict[str, str]:
         length = int(self.headers.get("Content-Length", "0"))
@@ -1359,14 +1832,27 @@ class CollectionHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/app.webmanifest":
+            self._send_bytes(_app_manifest(), content_type="application/manifest+json")
+            return
+        if parsed.path == "/service-worker.js":
+            self._send_bytes(
+                _service_worker(),
+                content_type="text/javascript; charset=utf-8",
+                cache_control="no-cache",
+            )
+            return
+        if parsed.path in {"/apple-touch-icon.png", "/icon-512.png"}:
+            size = 512 if parsed.path == "/icon-512.png" else 180
+            self._send_bytes(_app_icon_png(size), content_type="image/png")
+            return
         if parsed.path == "/":
             self._send_html("Game Collection", self._collection(parsed.query))
             return
-        if parsed.path == "/plan":
-            self._send_html("Plan Next", self._plan())
-            return
         if parsed.path == "/ingest":
-            self._send_html("Upload Photos", self._ingest_form())
+            params = urllib.parse.parse_qs(parsed.query)
+            message = (params.get("message") or [""])[0]
+            self._send_html("Upload Photos", self._ingest_form(message or None))
             return
         if parsed.path == "/caches":
             self._send_html("Cache Settings", self._cache_settings())
@@ -1385,11 +1871,11 @@ class CollectionHandler(BaseHTTPRequestHandler):
             try:
                 game_id = int(parsed.path.removeprefix("/games/").strip("/"))
             except ValueError:
-                self._send_html("Not Found", "<h1>Not found</h1>", HTTPStatus.NOT_FOUND)
+                self._send_html("Not Found", _simple_page("Missing Route", "Not Found", "That game URL is not valid."), HTTPStatus.NOT_FOUND)
                 return
             self._send_html("Game Detail", self._game_detail(game_id))
             return
-        self._send_html("Not Found", "<h1>Not found</h1>", HTTPStatus.NOT_FOUND)
+        self._send_html("Not Found", _simple_page("Missing Route", "Not Found", "That page does not exist."), HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
@@ -1401,6 +1887,9 @@ class CollectionHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/barcode-sources":
             self._handle_barcode_source_download()
+            return
+        if parsed.path == "/library-art-refresh":
+            self._handle_library_art_refresh()
             return
         if parsed.path.startswith("/ingest/") and parsed.path.endswith("/review"):
             run_id = parsed.path.split("/")[2]
@@ -1445,7 +1934,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 )
                 self._redirect(f"/games/{game_id}")
                 return
-        self._send_html("Not Found", "<h1>Not found</h1>", HTTPStatus.NOT_FOUND)
+        self._send_html("Not Found", _simple_page("Missing Route", "Not Found", "That action does not exist."), HTTPStatus.NOT_FOUND)
 
     def _send_media(self, query: str) -> None:
         params = urllib.parse.parse_qs(query)
@@ -1587,7 +2076,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
     <p class="library-subtitle">Swipe shelves by platform, publisher, release era, ownership, and play status. Cover art remains a visual verification aid; barcode data remains the inventory source.</p>
     <form class="library-search" method="get" action="/">
       <input name="q" value="{_h(q_raw)}" placeholder="Search title, platform, publisher, or developer">
-      <button type="submit">Search</button>
+      <button type="submit" aria-label="Search"><span class="button-icon">&#128269;</span></button>
       <input type="hidden" name="owning" value="{_h(owning)}">
       <input type="hidden" name="played" value="{_h(played)}">
       <input type="hidden" name="platform" value="{_h(platform_filter)}">
@@ -1692,14 +2181,6 @@ class CollectionHandler(BaseHTTPRequestHandler):
   <div class="game-card-meta">{meta}</div>
 </a>"""
 
-    def _plan(self) -> str:
-        conn = db.connect(self.db_path)
-        try:
-            rows = list(db.plan_next(conn, limit=100))
-        finally:
-            conn.close()
-        return f"<h1>Plan Next</h1><p class=\"muted\">Owned games that are unplayed or in progress.</p>{self._rows_table(rows)}"
-
     def _cache_settings(self, message: str | None = None, *, error: bool = False) -> str:
         notice = f'<div class="notice{" error" if error else ""}">{_h(message)}</div>' if message else ""
         statuses = platform_cache_statuses("igdb", self.platform_options)
@@ -1720,52 +2201,67 @@ class CollectionHandler(BaseHTTPRequestHandler):
 </tr>"""
             )
         return f"""
-<h1>Cache Settings</h1>
-{notice}
-<section class="panel">
-  <p class="muted">Choose platforms to build local metadata indexes for title autocomplete and cover art display. Barcode caches are built from local CSV sources with the CLI. Cached platforms are listed first; uncached platforms are alphabetical.</p>
-  <form method="post" action="/caches">
-    <table>
-      <thead><tr><th></th><th>Platform</th><th>Metadata Cache</th><th>Barcode Cache</th></tr></thead>
-      <tbody>{''.join(rows)}</tbody>
-    </table>
-    <div class="actions"><button type="submit">Build Selected Indexes</button></div>
-  </form>
-</section>
-<section class="panel">
-  <h2>Barcode Sources</h2>
-  <p class="muted">Download public barcode source data into ignored local CSVs, then rebuild barcode caches from all downloaded source files.</p>
-  <form method="post" action="/barcode-sources">
-    <div class="grid">
-      <label>Source
-        <select name="source">
-          <option value="wikidata-video-games">Wikidata Video Games</option>
-          <option value="upcdev-search">upc.dev Search</option>
-          <option value="upcdev-product">upc.dev Barcode Lookup</option>
-          <option value="open-products-facts">Open Products Facts Barcode Lookup</option>
-          <option value="csv-url">CSV URL</option>
-        </select>
-      </label>
-      <label>Query
-        <input name="query" placeholder="Required for upc.dev search">
-      </label>
-      <label>Barcodes
-        <input name="barcodes" placeholder="Comma or newline separated">
-      </label>
-      <label>CSV URL
-        <input name="url" placeholder="https://example.com/barcodes.csv">
-      </label>
-      <label>Limit
-        <input name="limit" type="number" min="1" placeholder="Optional">
-      </label>
-      <label>Offset
-        <input name="offset" type="number" min="0" placeholder="Optional">
-      </label>
-    </div>
-    <label><input type="checkbox" name="incremental" value="1" checked> Merge with existing source CSV</label>
-    <div class="actions"><button type="submit">Download Source And Rebuild Barcode Caches</button></div>
-  </form>
-</section>
+<div class="app-page">
+  <section class="page-hero">
+    <div class="page-kicker">Local Indexes</div>
+    <h1 class="page-title">Cache Settings</h1>
+    <p class="page-subtitle">Build the local metadata, cover art, and barcode caches used by upload review and manual entry.</p>
+  </section>
+  {notice}
+  <div class="page-stack">
+    <section class="panel">
+      <p class="muted">Choose platforms to build local metadata indexes for title autocomplete and cover art display. Barcode caches are built from local CSV sources with the CLI. Cached platforms are listed first; uncached platforms are alphabetical.</p>
+      <form method="post" action="/caches">
+        <table>
+          <thead><tr><th></th><th>Platform</th><th>Metadata Cache</th><th>Barcode Cache</th></tr></thead>
+          <tbody>{''.join(rows)}</tbody>
+        </table>
+        <div class="actions"><button type="submit"><span class="button-icon">&#9881;</span>Build</button></div>
+      </form>
+    </section>
+    <section class="panel">
+      <h2>Barcode Sources</h2>
+      <p class="muted">Download public barcode source data into ignored local CSVs, then rebuild barcode caches from all downloaded source files.</p>
+      <form method="post" action="/barcode-sources">
+        <div class="grid">
+          <label>Source
+            <select name="source">
+              <option value="wikidata-video-games">Wikidata Video Games</option>
+              <option value="upcdev-search">upc.dev Search</option>
+              <option value="upcdev-product">upc.dev Barcode Lookup</option>
+              <option value="open-products-facts">Open Products Facts Barcode Lookup</option>
+              <option value="csv-url">CSV URL</option>
+            </select>
+          </label>
+          <label>Query
+            <input name="query" placeholder="Required for upc.dev search">
+          </label>
+          <label>Barcodes
+            <input name="barcodes" placeholder="Comma or newline separated">
+          </label>
+          <label>CSV URL
+            <input name="url" placeholder="https://example.com/barcodes.csv">
+          </label>
+          <label>Limit
+            <input name="limit" type="number" min="1" placeholder="Optional">
+          </label>
+          <label>Offset
+            <input name="offset" type="number" min="0" placeholder="Optional">
+          </label>
+        </div>
+        <label><input type="checkbox" name="incremental" value="1" checked> Merge with existing source CSV</label>
+        <div class="actions"><button type="submit"><span class="button-icon">&#8635;</span>Fetch</button></div>
+      </form>
+    </section>
+    <section class="panel">
+      <h2>Library Art</h2>
+      <p class="muted">Re-query IGDB for games already in your library that do not have cover art yet. Newer games often gain artwork after the first import.</p>
+      <form method="post" action="/library-art-refresh">
+        <div class="actions"><button type="submit"><span class="button-icon">&#8635;</span>Refresh</button></div>
+      </form>
+    </section>
+  </div>
+</div>
 """
 
     def _handle_cache_settings(self) -> None:
@@ -1839,12 +2335,63 @@ class CollectionHandler(BaseHTTPRequestHandler):
         except (BarcodeSourceError, ValueError, OSError) as exc:
             self._send_html("Cache Settings", self._cache_settings(str(exc), error=True), HTTPStatus.BAD_REQUEST)
 
+    def _handle_library_art_refresh(self) -> None:
+        try:
+            provider = get_provider(DEFAULT_PROVIDER)
+            updated = 0
+            checked = 0
+            skipped = 0
+            seen_game_ids: set[int] = set()
+            with db.connect(self.db_path) as conn:
+                rows = [dict(row) for row in db.list_collection(conn)]
+                for row in rows:
+                    game_id = int(row["game_id"])
+                    if game_id in seen_game_ids:
+                        continue
+                    seen_game_ids.add(game_id)
+                    if row.get("cover_url"):
+                        skipped += 1
+                        continue
+                    title = row.get("title") or ""
+                    platform = row.get("platform") or None
+                    checked += 1
+                    entry = find_or_fetch_cover_entry_for_title(
+                        provider=provider,
+                        platform=platform,
+                        title=title,
+                        index_path=default_index_path(DEFAULT_PROVIDER, platform),
+                    )
+                    if not entry:
+                        continue
+                    db.update_game_metadata(
+                        conn,
+                        game_id=game_id,
+                        title=entry.title,
+                        platform=entry.platform or platform,
+                        release_date=entry.release_date or row.get("release_date"),
+                        developer=entry.developer or row.get("developer"),
+                        publisher=entry.publisher or row.get("publisher"),
+                        description=entry.description or row.get("description"),
+                        cover_url=entry.cover_url or row.get("cover_url"),
+                    )
+                    updated += 1
+            self._send_html(
+                "Cache Settings",
+                self._cache_settings(
+                    f"Refreshed library art: checked {checked}, updated {updated}, skipped {skipped} with existing art."
+                ),
+            )
+        except (ProviderError, ValueError) as exc:
+            self._send_html("Cache Settings", self._cache_settings(str(exc), error=True), HTTPStatus.BAD_REQUEST)
+
     def _ingest_form(self, message: str | None = None, *, error: bool = False) -> str:
         notice = f'<div class="notice{" error" if error else ""}">{_h(message)}</div>' if message else ""
-        provider_options = "".join(f'<option value="{provider}">{provider}</option>' for provider in PROVIDER_CHOICES)
         cached_platforms = _cached_platform_options(self.platform_options)
+        current_platform = self._last_platform() if not isinstance(self, type) else ""
+        if current_platform not in cached_platforms:
+            current_platform = ""
         platform_options = "".join(
-            f'<option value="{_h(platform)}">{_h(platform)}</option>'
+            f'<option value="{_h(platform)}"{_selected(current_platform, platform)}>{_h(platform)}</option>'
             for platform in cached_platforms
         )
         platform_control = (
@@ -1852,40 +2399,28 @@ class CollectionHandler(BaseHTTPRequestHandler):
             if cached_platforms
             else '<select name="platform" required disabled><option value="">No cached platforms</option></select>'
         )
-        status_options = "".join(f'<option value="{status}">{status}</option>' for status in OWNERSHIP_STATUSES)
-        played_options = "".join(f'<option value="{status}">{status}</option>' for status in PLAY_STATUSES)
-        expected_title_options = "".join(
-            f'<option value="{count}"{" selected" if count == 1 else ""}>{count}</option>'
-            for count in EXPECTED_TITLE_COUNTS
-        )
         return f"""
-<h1>Upload Photos</h1>
-{notice}
-<section class="panel upload-panel">
-  <form method="post" action="/ingest" enctype="multipart/form-data">
-    <label>Game case photos
-      <input type="file" name="photos" accept="image/*" multiple required>
-    </label>
-    <div class="grid">
-      <label>Metadata provider
-        <select name="provider">{provider_options}</select>
+<div class="app-page">
+  <section class="page-hero">
+    <div class="page-kicker">Barcode Ingest</div>
+    <h1 class="page-title">Scan One Game</h1>
+    <p class="page-subtitle">Upload or take one back-cover photo. The app scans for one barcode match, then gives you a fast visual confirmation screen.</p>
+  </section>
+  {notice}
+  <section class="panel upload-panel">
+    <form method="post" action="/ingest" enctype="multipart/form-data">
+      <label>Game case barcode photo
+        <input type="file" name="photos" accept="image/*" required>
       </label>
-      <label>Platform hint
-        {platform_control}
-      </label>
-      <label>Expected titles
-        <select name="expected_titles">{expected_title_options}</select>
-      </label>
-      <label>Ownership status
-        <select name="status">{status_options}</select>
-      </label>
-      <label>Initial play status
-        <select name="played">{played_options}</select>
-      </label>
-    </div>
-    <div class="actions"><button type="submit">Upload And Ingest</button></div>
-  </form>
-</section>
+      <div class="grid">
+        <label>Platform hint
+          {platform_control}
+        </label>
+      </div>
+      <div class="actions"><button type="submit"><span class="button-icon">&#128247;</span>Scan</button></div>
+    </form>
+  </section>
+</div>
 """
 
     def _run_dir(self, run_id: str) -> Path:
@@ -1898,7 +2433,11 @@ class CollectionHandler(BaseHTTPRequestHandler):
         try:
             db.init_db(self.db_path)
             fields, files = self._multipart_form()
-            image_files = [item for item in files if item["name"] == "photos" and item["data"]]
+            image_files = [
+                item
+                for item in files
+                if item["name"] in {"photos", "photo_library", "camera_photo"} and item["data"]
+            ]
             if not image_files:
                 self._send_html("Upload Photos", self._ingest_form("Choose at least one photo.", error=True))
                 return
@@ -1910,18 +2449,16 @@ class CollectionHandler(BaseHTTPRequestHandler):
             uploads_dir.mkdir(parents=True, exist_ok=True)
             crops_dir.mkdir(parents=True, exist_ok=True)
 
-            provider_name = fields.get("provider", "igdb")
+            provider_name = fields.get("provider") or DEFAULT_PROVIDER
             provider = get_provider(provider_name)
             platform = fields.get("platform") or None
             status = fields.get("status") or "owned"
             played = fields.get("played") or "unplayed"
-            expected_titles = int(fields.get("expected_titles") or "1")
-            if expected_titles not in EXPECTED_TITLE_COUNTS:
-                raise ValueError("Expected titles must be between 1 and 30.")
             if not platform:
                 self._send_html("Upload Photos", self._ingest_form("Choose a cached platform.", error=True))
                 return
-            cover_entries = read_cover_index(default_index_path(provider_name, platform))
+            cover_index_path = default_index_path(provider_name, platform)
+            cover_entries = read_cover_index(cover_index_path)
             barcode_entries = read_platform_barcode_cache(platform)
             rows: list[dict[str, str]] = []
             for index, file_info in enumerate(image_files, start=1):
@@ -1935,19 +2472,35 @@ class CollectionHandler(BaseHTTPRequestHandler):
                         platform=platform,
                         cover_entries=cover_entries,
                         barcode_entries=barcode_entries,
+                        live_lookup=True,
                         accept_threshold=2.0,
                     )
                 )
             for row in rows:
+                if row.get("matched_title") and not _matched_cover_path(row):
+                    try:
+                        cover_entry = find_or_fetch_cover_entry_for_title(
+                            provider=provider,
+                            platform=platform,
+                            title=row["matched_title"],
+                            index_path=cover_index_path,
+                            existing_entries=cover_entries,
+                        )
+                    except ProviderError:
+                        cover_entry = None
+                    if cover_entry:
+                        _apply_cover_entry_to_row(row, cover_entry)
+                        cover_entries.append(cover_entry)
                 row["decision"] = "review"
                 row["play_status"] = played
             detected_count = len(rows)
-            rows = _fit_review_rows_to_expected_count(
-                rows,
-                expected_count=expected_titles,
-                platform=platform,
-                play_status=played,
-            )
+            rows = rows[:1] if rows else [
+                _blank_review_row(
+                    platform=platform,
+                    play_status=played,
+                    note="No barcode match found; choose a title manually.",
+                )
+            ]
 
             write_review(self._audit_path(run_id), rows)
 
@@ -1957,7 +2510,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 "status": status,
                 "played": played,
                 "uploaded": str(len(image_files)),
-                "expected_titles": str(expected_titles),
+                "expected_titles": "1",
                 "detected_barcodes": str(detected_count),
                 "candidates": str(len(rows)),
                 "cover_index_entries": str(len(cover_entries)),
@@ -1969,7 +2522,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 "\n".join(f"{key},{value}" for key, value in summary.items()),
                 encoding="utf-8",
             )
-            self._redirect(f"/ingest/{run_id}")
+            self._redirect_remembering_platform(f"/ingest/{run_id}", platform)
         except (PhotoIngestError, ProviderError, ValueError) as exc:
             self._send_html("Upload Photos", self._ingest_form(str(exc), error=True), HTTPStatus.BAD_REQUEST)
 
@@ -1986,29 +2539,21 @@ class CollectionHandler(BaseHTTPRequestHandler):
     def _ingest_results(self, run_id: str, message: str | None = None) -> str:
         audit_path = self._audit_path(run_id)
         if not audit_path.exists():
-            return "<h1>Ingest run not found</h1>"
+            return _simple_page("Missing Review", "Ingest Run Not Found", "That upload review run no longer exists.")
         rows = read_review(audit_path)
-        summary = self._summary(run_id)
-        accepted = sum(1 for row in rows if row.get("decision") == "accept")
-        needs_review = len(rows) - accepted
         notice = f'<div class="notice">{_h(message)}</div>' if message else ""
-        uploaded_photos = self._uploaded_photo_panel(run_id)
         return f"""
-<h1>Ingest Results</h1>
-{notice}
-<div class="ingest-summary-grid">
-  <section class="panel">
-    <p><strong>{len(rows)}</strong> suggested match(es), <strong>{accepted}</strong> marked for import, <strong>{needs_review}</strong> awaiting review.</p>
-    <p class="muted">Expected titles: {_h(summary.get('expected_titles') or len(rows))} | Detected barcodes: {_h(summary.get('detected_barcodes') or summary.get('detected_candidates') or len(rows))}</p>
-    <p class="muted">Barcode catalog entries: {_h(summary.get('barcode_catalog_entries', '0'))}. Cover art is shown from cached database metadata when a barcode/title match has one.</p>
-    <p class="muted">Provider: {_h(summary.get('provider'))} | Platform hint: {_h(summary.get('platform')) or 'none'}</p>
+<div class="app-page">
+  <section class="page-hero">
+    <div class="page-kicker">Confirm Match</div>
+    <h1 class="page-title">Review One Game</h1>
+    <p class="page-subtitle">Confirm the barcode result visually. Change the platform or title if needed, then accept or reject this scan.</p>
   </section>
-  {uploaded_photos}
+  {notice}
+  <form method="post" action="/ingest/{_h(run_id)}/review">
+    {self._review_rows_table(rows)}
+  </form>
 </div>
-<form method="post" action="/ingest/{_h(run_id)}/review">
-  {self._review_rows_table(rows)}
-  <div class="actions"><button type="submit">Save And Import Accepted Rows</button><a class="button secondary" href="/ingest">Upload More Photos</a><a class="button secondary" href="/">Back To Library</a></div>
-</form>
 """
 
     def _uploaded_photo_panel(self, run_id: str) -> str:
@@ -2029,7 +2574,6 @@ class CollectionHandler(BaseHTTPRequestHandler):
 </section>"""
 
     def _review_rows_table(self, rows: list[dict[str, str]]) -> str:
-        grouped_rows = {"review": [], "accept": [], "ignore": []}
         cached_platforms = _cached_platform_options(self.platform_options)
 
         def platform_select(index: int, current_platform: str | None) -> str:
@@ -2051,142 +2595,84 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 f'data-role="row-platform-select">{option_html}</select>'
             )
 
-        def play_status_select(index: int, current_status: str | None) -> str:
-            current = current_status if current_status in PLAY_STATUSES else "unplayed"
-            options = "".join(
-                f'<option value="{_h(status)}"{" selected" if status == current else ""}>{_h(status)}</option>'
-                for status in PLAY_STATUSES
-            )
-            return f'<select name="row_{index}_play_status">{options}</select>'
-
-        default_platform = rows[0].get("platform", "") if rows else (cached_platforms[0] if cached_platforms else "")
-        manual_platform_options = "".join(
-            f'<option value="{_h(platform)}"{" selected" if platform == default_platform else ""}>{_h(platform)}</option>'
-            for platform in cached_platforms
+        row = rows[0] if rows else _blank_review_row(
+            platform=cached_platforms[0] if cached_platforms else "",
+            play_status="unplayed",
+            note="No barcode match found; choose a title manually.",
         )
-        if default_platform and default_platform not in cached_platforms:
-            manual_platform_options = (
-                f'<option value="{_h(default_platform)}" selected>{_h(default_platform)}</option>' + manual_platform_options
+        index = 0
+        upload = row.get("upload_path") or row.get("photo_path") or ""
+        sample_image = row.get("sample_image_path") or row.get("crop_path") or upload
+        if not _matched_cover_path(row):
+            cover_entry = _cached_exact_cover_entry(
+                provider=DEFAULT_PROVIDER,
+                platform=row.get("platform") or "",
+                title=row.get("matched_title") or "",
             )
-        manual_play_options = "".join(
-            f'<option value="{_h(status)}"{" selected" if status == "unplayed" else ""}>{_h(status)}</option>'
-            for status in PLAY_STATUSES
+            if cover_entry:
+                _apply_cover_entry_to_row(row, cover_entry)
+        matched_cover = _matched_cover_path(row)
+        sample_html = _cover_thumb(sample_image, "Uploaded", "Uploaded source image", opens_modal=True)
+        matched_cover_html = _cover_thumb(
+            matched_cover,
+            "Matched",
+            "Matched cached cover art",
+            row_index=index,
+            role="matched-cover-sample",
         )
-
-        for index, row in enumerate(rows):
-            upload = row.get("upload_path") or row.get("photo_path") or ""
-            sample_image = row.get("sample_image_path") or row.get("crop_path") or upload
-            decision = row.get("decision") if row.get("decision") in grouped_rows else "review"
-            matched_cover = _matched_cover_path(row)
-            sample_html = _cover_thumb(sample_image, "Uploaded", "Uploaded source image", opens_modal=True)
-            matched_cover_html = _cover_thumb(
-                matched_cover,
-                "Matched",
-                "Matched cached cover art",
-                row_index=index,
-                role="matched-cover-sample",
+        barcode_text = row.get("barcode") or ""
+        source_text = f"Barcode: {barcode_text}" if barcode_text else "No barcode catalog match"
+        hidden_metadata = "".join(
+            f'<input type="hidden" name="row_{index}_{field}" value="{_h(row.get(field))}">'
+            for field in (
+                "provider",
+                "provider_game_id",
+                "candidate_title",
+                "release_date",
+                "developer",
+                "publisher",
+                "description",
+                "cover_url",
+                "confidence",
+                "notes",
+                "barcode",
+                "source_provider",
+                "source_id",
             )
-            cover_pair_html = f'<div class="cover-pair">{sample_html}{matched_cover_html}</div>'
-            source_bits = [
-                row.get("source_provider") or "",
-                row.get("source_id") or "",
-                row.get("barcode") or "",
-            ]
-            source_text = " | ".join(bit for bit in source_bits if bit) or "manual"
-            hidden_metadata = "".join(
-                f'<input type="hidden" name="row_{index}_{field}" value="{_h(row.get(field))}">'
-                for field in (
-                    "provider",
-                    "provider_game_id",
-                    "candidate_title",
-                    "release_date",
-                    "developer",
-                    "publisher",
-                    "description",
-                    "cover_url",
-                    "confidence",
-                    "notes",
-                    "barcode",
-                    "source_provider",
-                    "source_id",
-                )
-            )
-            if decision == "review":
-                action_buttons = f"""
-    <div class="decision-actions" data-row="{index}" data-role="decision-actions">
-      <button class="icon-button accept" type="button" data-row="{index}" data-action-decision="accept" title="Accept">&#10003;</button>
-      <button class="icon-button ignore" type="button" data-row="{index}" data-action-decision="ignore" title="Ignore">&#10005;</button>
-    </div>"""
-            elif decision == "accept":
-                action_buttons = f"""
-    <div class="decision-actions" data-row="{index}" data-role="decision-actions">
-      <button class="icon-button review" type="button" data-row="{index}" data-action-decision="review" title="Move to review">&#8634;</button>
-      <button class="icon-button ignore" type="button" data-row="{index}" data-action-decision="ignore" title="Ignore">&#10005;</button>
-    </div>"""
-            else:
-                action_buttons = f"""
-    <div class="decision-actions" data-row="{index}" data-role="decision-actions">
-      <button class="icon-button review" type="button" data-row="{index}" data-action-decision="review" title="Move to review">&#8634;</button>
-      <button class="icon-button accept" type="button" data-row="{index}" data-action-decision="accept" title="Accept">&#10003;</button>
-    </div>"""
-            grouped_rows[decision].append(
-                f"""
-<tr data-row="{index}" data-decision="{_h(decision)}">
-  <td>{cover_pair_html}<input type="hidden" name="row_{index}_upload_path" value="{_h(upload)}"><input type="hidden" name="row_{index}_sample_image_path" value="{_h(sample_image)}"></td>
-  <td>{platform_select(index, row.get('platform'))}</td>
-  <td>{play_status_select(index, row.get('play_status'))}</td>
-  <td><span class="muted">{_h(source_text)}</span></td>
-  <td>
-    <div class="match-control">
-      <textarea class="title-field" name="row_{index}_matched_title" rows="2" data-row="{index}" data-role="match-title-input" autocomplete="off">{_h(row.get('matched_title'))}</textarea>
-      <div class="match-suggestions" data-row="{index}" data-role="match-suggestions" hidden></div>
-    </div>
-  </td>
-  <td>{action_buttons}<input type="hidden" name="row_{index}_decision" value="{_h(decision)}"></td>
-  <td>{hidden_metadata}</td>
-</tr>"""
-            )
-
-        def section_table(decision: str, title: str, empty_text: str) -> str:
-            body_rows = "".join(grouped_rows[decision])
-            empty_hidden = " hidden" if grouped_rows[decision] else ""
-            return f"""
-<section class="outcome-section">
-  <h2>{_h(title)} <span class="badge" data-role="{decision}-count">{len(grouped_rows[decision])}</span></h2>
-  <div class="empty-state" data-role="{decision}-empty"{empty_hidden}>{_h(empty_text)}</div>
-  <table class="review-table">
-    <thead><tr><th>Covers</th><th>Platform</th><th>Play Status</th><th>Source</th><th>Matched Title</th><th>Action</th><th></th></tr></thead>
-    <tbody data-role="{decision}-rows">{body_rows}</tbody>
-  </table>
-</section>"""
+        )
+        play_status = row.get("play_status") if row.get("play_status") in PLAY_STATUSES else "unplayed"
 
         return f"""
-<input type="hidden" name="row_count" value="{len(rows)}">
-<section class="manual-review panel">
-  <h2>Manual Review</h2>
-  <div class="manual-review-form">
+<input type="hidden" name="row_count" value="1">
+<section class="panel single-review">
+  <div class="single-review-covers">
+    {sample_html}
+    {matched_cover_html}
+  </div>
+  <div class="single-review-fields">
+    <p class="muted">Source: {_h(source_text)}</p>
     <label>Platform
-      <select data-role="manual-platform">{manual_platform_options}</select>
-    </label>
-    <label>Play Status
-      <select data-role="manual-play-status">{manual_play_options}</select>
+      {platform_select(index, row.get('platform'))}
     </label>
     <label>Matched Title
       <div class="match-control">
-        <input data-role="manual-title" autocomplete="off" placeholder="Start typing a title">
-        <div class="match-suggestions" data-role="manual-suggestions" hidden></div>
+        <textarea class="title-field" name="row_{index}_matched_title" rows="2" data-row="{index}" data-role="match-title-input" autocomplete="off" placeholder="Start typing to choose a title">{_h(row.get('matched_title'))}</textarea>
+        <div class="match-suggestions" data-row="{index}" data-role="match-suggestions" hidden></div>
       </div>
     </label>
-    <button type="button" data-role="manual-add">Add To Review</button>
-  </div>
-  <div class="manual-preview" data-role="manual-preview" hidden>
-    <img class="crop-thumb" data-role="manual-cover" alt="Matched cached cover art" hidden>
-    <span>Selected: <strong data-role="manual-selected-title"></strong></span>
+    <input type="hidden" name="row_{index}_upload_path" value="{_h(upload)}">
+    <input type="hidden" name="row_{index}_sample_image_path" value="{_h(sample_image)}">
+    <input type="hidden" name="row_{index}_play_status" value="{_h(play_status)}">
+    <input type="hidden" name="row_{index}_decision" value="review">
+    {hidden_metadata}
+    <div class="single-review-actions">
+      <button type="submit" name="row_{index}_decision" value="accept" aria-label="Accept match"><span class="button-icon">&#10003;</span>Accept</button>
+      <button type="button" class="secondary" data-role="change-match" aria-label="Change match"><span class="button-icon">&#9998;</span>Edit</button>
+      <button type="submit" class="reject" name="row_{index}_decision" value="ignore" formnovalidate aria-label="Reject match"><span class="button-icon">&#10005;</span>Reject</button>
+      <a class="button secondary" href="/ingest" aria-label="Scan another game"><span class="button-icon">&#8634;</span>Again</a>
+    </div>
   </div>
 </section>
-{section_table("review", "Review Queue", "No rows waiting for review.")}
-{section_table("accept", "Accepted", "No accepted rows yet.")}
-{section_table("ignore", "Ignored", "No ignored rows yet.")}
 """
 
     def _handle_ingest_review(self, run_id: str) -> None:
@@ -2207,10 +2693,12 @@ class CollectionHandler(BaseHTTPRequestHandler):
             played=summary.get("played") or "unplayed",
             skip_existing=True,
         )
-        self._send_html(
-            "Ingest Results",
-            self._ingest_results(run_id, f"Imported {imported} newly accepted row(s); skipped {skipped} existing row(s)."),
-        )
+        message = f"Imported {imported}; skipped {skipped}."
+        reviewed_platform = next((row.get("platform") for row in rows if row.get("platform")), "")
+        if reviewed_platform:
+            self._redirect_remembering_platform(f"/ingest?message={urllib.parse.quote(message)}", reviewed_platform)
+        else:
+            self._redirect(f"/ingest?message={urllib.parse.quote(message)}")
 
     def _rows_table(self, rows: list[sqlite3.Row]) -> str:
         if not rows:
@@ -2242,7 +2730,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
         finally:
             conn.close()
         if row is None:
-            return "<h1>Game not found</h1>"
+            return _simple_page("Missing Game", "Game Not Found", "That game is not in the local collection database.")
         cover = (
             f'<img class="cover" src="{_h(row["cover_url"])}" alt="Cover art for {_h(row["title"])}">'
             if row["cover_url"]
@@ -2254,58 +2742,64 @@ class CollectionHandler(BaseHTTPRequestHandler):
         )
         play_options = "".join(f'<option value="{status}">{status}</option>' for status in PLAY_STATUSES)
         return f"""
-<h1>{_h(row['title'])}</h1>
-<div class="detail">
-  <div>
-    {cover}
-    <p class="muted">{_h(row['provider'])}:{_h(row['provider_game_id'])}</p>
-  </div>
-  <div>
-    <section class="panel">
-      <h2>Metadata</h2>
-      <form method="post" action="/games/{game_id}/metadata">
-        <div class="grid">
-          <label>Title <input name="title" value="{_h(row['title'])}" required></label>
-          <label>Platform <input name="platform" value="{_h(row['platform'])}"></label>
-          <label>Release date <input name="release_date" value="{_h(row['release_date'])}" placeholder="YYYY-MM-DD"></label>
-          <label>Developer <input name="developer" value="{_h(row['developer'])}"></label>
-          <label>Publisher <input name="publisher" value="{_h(row['publisher'])}"></label>
-          <label>Cover URL <input name="cover_url" value="{_h(row['cover_url'])}"></label>
-        </div>
-        <label>Description <textarea name="description">{_h(row['description'])}</textarea></label>
-        <div class="actions"><button type="submit">Save Metadata</button><a class="button secondary" href="/">Back</a></div>
-      </form>
-    </section>
+<div class="app-page">
+  <section class="page-hero">
+    <div class="page-kicker">Game Detail</div>
+    <h1 class="page-title">{_h(row['title'])}</h1>
+    <p class="page-subtitle">{_h(row['platform']) or 'No platform'}{(' | ' + _h(row['publisher'])) if row['publisher'] else ''}</p>
+  </section>
+  <div class="detail">
+    <div>
+      {cover}
+      <p class="page-subtitle">{_h(row['provider'])}:{_h(row['provider_game_id'])}</p>
+    </div>
+    <div class="page-stack">
+      <section class="panel">
+        <h2>Metadata</h2>
+        <form method="post" action="/games/{game_id}/metadata">
+          <div class="grid">
+            <label>Title <input name="title" value="{_h(row['title'])}" required></label>
+            <label>Platform <input name="platform" value="{_h(row['platform'])}"></label>
+            <label>Release date <input name="release_date" value="{_h(row['release_date'])}" placeholder="YYYY-MM-DD"></label>
+            <label>Developer <input name="developer" value="{_h(row['developer'])}"></label>
+            <label>Publisher <input name="publisher" value="{_h(row['publisher'])}"></label>
+            <label>Cover URL <input name="cover_url" value="{_h(row['cover_url'])}"></label>
+          </div>
+          <label>Description <textarea name="description">{_h(row['description'])}</textarea></label>
+          <div class="actions"><button type="submit"><span class="button-icon">&#10003;</span>Save</button><a class="button secondary" href="/" aria-label="Back to library"><span class="button-icon">&#8592;</span>Back</a></div>
+        </form>
+      </section>
 
-    <section class="panel">
-      <h2>Collection Copy</h2>
-      <form method="post" action="/items/{row['collection_item_id']}/collection">
-        <input type="hidden" name="game_id" value="{game_id}">
-        <div class="grid">
-          <label>Ownership
-            <select name="acquisition_status">{ownership_options}</select>
-          </label>
-          <label>Location <input name="location" value="{_h(row['location'])}"></label>
-        </div>
-        <label>Condition notes <textarea name="condition_notes">{_h(row['condition_notes'])}</textarea></label>
-        <label>Sale notes <textarea name="sale_notes">{_h(row['sale_notes'])}</textarea></label>
-        <p class="muted">Latest play status: <strong>{_h(row['latest_play_status'])}</strong>{' | Sold on: ' + _h(row['sold_on']) if row['sold_on'] else ''}</p>
-        <div class="actions"><button type="submit">Save Collection Copy</button></div>
-      </form>
-    </section>
+      <section class="panel">
+        <h2>Collection Copy</h2>
+        <form method="post" action="/items/{row['collection_item_id']}/collection">
+          <input type="hidden" name="game_id" value="{game_id}">
+          <div class="grid">
+            <label>Ownership
+              <select name="acquisition_status">{ownership_options}</select>
+            </label>
+            <label>Location <input name="location" value="{_h(row['location'])}"></label>
+          </div>
+          <label>Condition notes <textarea name="condition_notes">{_h(row['condition_notes'])}</textarea></label>
+          <label>Sale notes <textarea name="sale_notes">{_h(row['sale_notes'])}</textarea></label>
+          <p class="muted">Latest play status: <strong>{_h(row['latest_play_status'])}</strong>{' | Sold on: ' + _h(row['sold_on']) if row['sold_on'] else ''}</p>
+          <div class="actions"><button type="submit"><span class="button-icon">&#10003;</span>Save</button></div>
+        </form>
+      </section>
 
-    <section class="panel">
-      <h2>Play History</h2>
-      <form method="post" action="/games/{game_id}/play">
-        <div class="grid">
-          <label>New play status
-            <select name="play_status">{play_options}</select>
-          </label>
-          <label>Notes <input name="notes" placeholder="Optional note"></label>
-        </div>
-        <div class="actions"><button type="submit">Record Play Status</button></div>
-      </form>
-    </section>
+      <section class="panel">
+        <h2>Play History</h2>
+        <form method="post" action="/games/{game_id}/play">
+          <div class="grid">
+            <label>New play status
+              <select name="play_status">{play_options}</select>
+            </label>
+            <label>Notes <input name="notes" placeholder="Optional note"></label>
+          </div>
+          <div class="actions"><button type="submit"><span class="button-icon">&#9679;</span>Log</button></div>
+        </form>
+      </section>
+    </div>
   </div>
 </div>"""
 

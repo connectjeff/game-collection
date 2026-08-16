@@ -13,6 +13,7 @@ from game_collection.barcode_match import (
     is_expected_barcode_for_platform,
     match_barcode,
     normalize_barcode,
+    normalize_platform_name,
     platform_barcode_hint,
     read_barcode_catalog,
     write_barcode_catalog,
@@ -31,6 +32,11 @@ class BarcodeMatchTests(unittest.TestCase):
         self.assertEqual(normalize_barcode("0 45496 90565 1"), "045496905651")
         self.assertEqual(normalize_barcode("00045496905651"), "045496905651")
         self.assertIn("00045496905651", barcode_variants("045496905651"))
+
+    def test_normalize_platform_name_maps_source_aliases_to_app_platforms(self) -> None:
+        self.assertEqual(normalize_platform_name("Xbox Series X and Series S"), "Xbox Series X|S")
+        self.assertEqual(normalize_platform_name("playstation 5"), "PlayStation 5")
+        self.assertEqual(normalize_platform_name("Nintendo Switch"), "Nintendo Switch")
 
     def test_platform_hint_filters_retail_barcode_lengths_and_prefers_known_prefixes(self) -> None:
         switch_hint = platform_barcode_hint("Nintendo Switch")
@@ -73,12 +79,27 @@ class BarcodeMatchTests(unittest.TestCase):
         self.assertEqual(match.provider_game_id, "045496905651")
         self.assertEqual(match.confidence, 1.0)
 
+    def test_external_barcode_import_normalizes_platform_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "source.csv"
+            path.write_text(
+                "barcode,title,platform\n"
+                "889842640908,Example Xbox Game,Xbox Series X and Series S\n",
+                encoding="utf-8",
+            )
+
+            results = build_barcode_cache(source_paths=[path], cache_root=Path(tmp) / "cache")
+
+        self.assertEqual(results["Xbox Series X|S"], 1)
+
     def test_match_barcode_uses_cover_index_metadata_when_available(self) -> None:
         catalog = [
             BarcodeCatalogEntry(
                 barcode="045496905651",
                 title="Super Mario Galaxy + Super Mario Galaxy 2",
                 platform="Nintendo Switch",
+                provider="wikidata",
+                provider_game_id="Q123",
             )
         ]
         cover_entries = [
@@ -103,6 +124,9 @@ class BarcodeMatchTests(unittest.TestCase):
         self.assertEqual(match.provider_game_id, "12345")
         self.assertEqual(match.release_date, "2025-10-02")
         self.assertEqual(match.cover_url, "https://example.test/cover.jpg")
+        self.assertEqual(match.raw["source_provider"], "wikidata")
+        self.assertEqual(match.raw["source_id"], "Q123")
+        self.assertEqual(match.raw["cover_index_path"], "cover.jpg")
 
     def test_builds_platform_barcode_cache_from_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

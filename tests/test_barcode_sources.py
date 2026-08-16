@@ -13,6 +13,7 @@ from game_collection.barcode_sources import (
     download_upcdev_products,
     download_upcdev_search,
     download_wikidata_video_game_barcodes,
+    lookup_live_barcode,
 )
 
 
@@ -95,6 +96,25 @@ class BarcodeSourceTests(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].provider, "openproductsfacts")
         self.assertEqual(entries[0].platform, "PlayStation 5")
+
+    def test_live_lookup_uses_upcdev_product_after_pricecharting_miss(self) -> None:
+        payload = {
+            "data": {
+                "upc": "045496905651",
+                "name": "Super Mario Galaxy + Super Mario Galaxy 2 Nintendo Switch",
+                "brand": "Nintendo",
+            }
+        }
+        with (
+            patch("game_collection.barcode_sources._lookup_pricecharting_redirect", return_value=None),
+            patch("game_collection.barcode_sources._get_json", return_value=payload),
+        ):
+            entry = lookup_live_barcode("045496905651", platform="Nintendo Switch")
+
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.title, "Super Mario Galaxy + Super Mario Galaxy 2 Nintendo Switch")
+        self.assertEqual(entry.provider, "upcdev")
+        self.assertEqual(entry.platform, "Nintendo Switch")
 
     def test_download_csv_url_incrementally_merges_existing_rows(self) -> None:
         csv_text = (

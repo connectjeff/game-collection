@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .barcode_match import BarcodeCatalogEntry, detect_barcodes, match_barcode
+from .barcode_sources import lookup_live_barcode
 from .cover_cache import CoverIndexEntry
 from .review import match_to_row
 from .review import write_review
@@ -33,6 +34,7 @@ def detect_photo_candidates(
     platform: str | None = None,
     cover_entries: list[CoverIndexEntry] | None = None,
     barcode_entries: list[BarcodeCatalogEntry] | None = None,
+    live_lookup: bool = False,
     accept_threshold: float = 0.92,
     min_area_ratio: float | None = None,
 ) -> list[dict[str, str]]:
@@ -53,6 +55,17 @@ def detect_photo_candidates(
             platform=platform,
             cover_entries=cover_entries,
         )
+        source_note = "exact barcode catalog match"
+        if not barcode_match and live_lookup:
+            live_entry = lookup_live_barcode(barcode, platform=platform)
+            if live_entry:
+                barcode_match = match_barcode(
+                    barcode,
+                    [live_entry],
+                    platform=platform,
+                    cover_entries=cover_entries,
+                )
+                source_note = f"live barcode lookup: {live_entry.provider or 'unknown'}"
         row = _blank_candidate_row(
             photo_path=photo_path,
             platform=platform,
@@ -62,9 +75,10 @@ def detect_photo_candidates(
         if barcode_match:
             row["candidate_title"] = barcode_match.title
             row = match_to_row(row, barcode_match, accept_threshold=accept_threshold)
-            row["notes"] = (
-                f"barcode={barcode}; exact barcode catalog match"
-            )
+            cover_path = (barcode_match.raw or {}).get("cover_index_path")
+            row["notes"] = f"barcode={barcode}; {source_note}"
+            if cover_path:
+                row["notes"] += f"; cover_path={cover_path}"
         rows.append(row)
     return rows
 
@@ -106,6 +120,7 @@ def write_photo_candidates(
     platform: str | None = None,
     cover_entries: list[CoverIndexEntry] | None = None,
     barcode_entries: list[BarcodeCatalogEntry] | None = None,
+    live_lookup: bool = False,
     accept_threshold: float = 0.92,
 ) -> int:
     all_rows: list[dict[str, str]] = []
@@ -117,6 +132,7 @@ def write_photo_candidates(
                 platform=platform,
                 cover_entries=cover_entries,
                 barcode_entries=barcode_entries,
+                live_lookup=live_lookup,
                 accept_threshold=accept_threshold,
             )
         )
