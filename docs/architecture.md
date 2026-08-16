@@ -31,7 +31,7 @@ flowchart LR
     I --> J["Library browser"]
 ```
 
-There is no user-facing folder ingestion method. The web server still stores uploaded images, audit rows, and caches under ignored local paths so the browser workflow can resume and display review state.
+The web server stores uploaded images, audit rows, and caches under ignored local paths so the browser workflow can resume and display review state.
 
 ## Data Model
 

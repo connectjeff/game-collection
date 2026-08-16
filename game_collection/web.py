@@ -99,25 +99,6 @@ def _blank_review_row(*, platform: str | None, play_status: str | None, note: st
     }
 
 
-def _fit_review_rows_to_expected_count(
-    rows: list[dict[str, str]],
-    *,
-    expected_count: int,
-    platform: str | None,
-    play_status: str | None,
-) -> list[dict[str, str]]:
-    fitted = rows[:expected_count]
-    while len(fitted) < expected_count:
-        fitted.append(
-            _blank_review_row(
-                platform=platform,
-                play_status=play_status,
-                note="Expected title placeholder; add a matched title manually.",
-            )
-        )
-    return fitted
-
-
 def _cached_platform_options(platforms: list[str]) -> list[str]:
     return [status.name for status in platform_cache_statuses("igdb", platforms) if status.cached]
 
@@ -2275,7 +2256,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
   {notice}
   <div class="page-stack">
     <section class="panel">
-      <p class="muted">Choose platforms to build local metadata indexes for title autocomplete and cover art display. Barcode caches are built from local CSV sources with the CLI. Cached platforms are listed first; uncached platforms are alphabetical.</p>
+      <p class="muted">Choose platforms to build local metadata indexes for title autocomplete and cover art display. Barcode caches are rebuilt from downloaded source files on this page. Cached platforms are listed first; uncached platforms are alphabetical.</p>
       <form method="post" action="/caches">
         <table>
           <thead><tr><th></th><th>Platform</th><th>Metadata Cache</th><th>Barcode Cache</th></tr></thead>
@@ -2507,7 +2488,7 @@ class CollectionHandler(BaseHTTPRequestHandler):
             image_files = [
                 item
                 for item in files
-                if item["name"] in {"photos", "photo_library", "camera_photo"} and item["data"]
+                if item["name"] == "photos" and item["data"]
             ]
             if not image_files:
                 self._send_html("Upload Photos", self._ingest_form("Choose at least one photo.", error=True))
@@ -2582,7 +2563,6 @@ class CollectionHandler(BaseHTTPRequestHandler):
                 "status": status,
                 "played": played,
                 "uploaded": str(len(image_files)),
-                "expected_titles": "1",
                 "detected_barcodes": str(detected_count),
                 "candidates": str(len(rows)),
                 "cover_index_entries": str(len(cover_entries)),
@@ -2628,23 +2608,6 @@ class CollectionHandler(BaseHTTPRequestHandler):
 </div>
 """
 
-    def _uploaded_photo_panel(self, run_id: str) -> str:
-        uploads_dir = self._run_dir(run_id) / "uploads"
-        photos = sorted(path for path in uploads_dir.iterdir() if path.suffix.lower() in IMAGE_SUFFIXES) if uploads_dir.exists() else []
-        if not photos:
-            return '<section class="panel"><h2>Uploaded Photos</h2><p class="muted">No uploaded photo files found for this run.</p></section>'
-        thumbs = "".join(
-            f'<button class="thumb-button" type="button" data-modal-image="/media?path={urllib.parse.quote(str(path))}">'
-            f'<img class="uploaded-photo-thumb" src="/media?path={urllib.parse.quote(str(path))}" alt="Uploaded photo {_h(path.name)}">'
-            f'</button>'
-            for path in photos
-        )
-        return f"""
-<section class="panel">
-  <h2>Uploaded Photos</h2>
-  <div class="uploaded-photos">{thumbs}</div>
-</section>"""
-
     def _review_rows_table(self, rows: list[dict[str, str]]) -> str:
         cached_platforms = _cached_platform_options(self.platform_options)
 
@@ -2673,8 +2636,8 @@ class CollectionHandler(BaseHTTPRequestHandler):
             note="No barcode match found; choose a title manually.",
         )
         index = 0
-        upload = row.get("upload_path") or row.get("photo_path") or ""
-        sample_image = row.get("sample_image_path") or row.get("crop_path") or upload
+        upload = row.get("upload_path") or ""
+        sample_image = row.get("sample_image_path") or upload
         if not _matched_cover_path(row):
             cover_entry = _cached_exact_cover_entry(
                 provider=DEFAULT_PROVIDER,

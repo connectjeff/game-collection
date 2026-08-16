@@ -92,4 +92,4 @@ collection.sqlite3
 review/
 ```
 
-`review/` is still used internally by the web app for uploaded images, generated review rows, barcode sources, and metadata caches. It is no longer a user-facing folder ingestion workflow.
+`review/` is used internally by the web app for uploaded images, generated review rows, barcode sources, and metadata caches.

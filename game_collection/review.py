@@ -30,20 +30,9 @@ INTAKE_FIELDS = [
     "notes",
 ]
 
-LEGACY_FIELD_ALIASES = {
-    "upload_path": "photo_path",
-    "sample_image_path": "crop_path",
-}
-
-
 def read_review(path: Path) -> list[dict[str, str]]:
     with path.open("r", newline="", encoding="utf-8") as handle:
-        rows = list(csv.DictReader(handle))
-    for row in rows:
-        for field, legacy_field in LEGACY_FIELD_ALIASES.items():
-            if not row.get(field) and row.get(legacy_field):
-                row[field] = row[legacy_field]
-    return rows
+        return list(csv.DictReader(handle))
 
 
 def write_review(path: Path, rows: list[dict[str, str]]) -> None:
