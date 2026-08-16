@@ -93,26 +93,3 @@ review/
 ```
 
 `review/` is still used internally by the web app for uploaded images, generated review rows, barcode sources, and metadata caches. It is no longer a user-facing folder ingestion workflow.
-
-## Database Shape
-
-The SQLite schema is trimmed to the current web app:
-
-- `games`: provider metadata, title, platform, release date, description, cover URL, raw metadata JSON.
-- `collection_items`: one library copy per game with collection state and timestamps.
-- `playthroughs`: play status history for each game.
-- `collection_summary`: browser-friendly view combining collection and latest play status.
-
-Removed legacy fields include free-text condition/location/sale notes, separate acquired/sold/price fields, play session date/note fields, and unused tag tables.
-
-## Public Repo Hygiene
-
-This repo is safe to publish when only source, docs, tests, and examples are committed. Do not commit:
-
-- `.env` or Twitch/IGDB credentials,
-- `collection.sqlite3`,
-- `review/`,
-- personal barcode exports,
-- uploaded game photos.
-
-Example files may show formats, but should not contain your personal collection data.
